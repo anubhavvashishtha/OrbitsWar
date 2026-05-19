@@ -140,11 +140,14 @@ def aim_with_prediction(src, target, ships, initial_by_id, ang_vel):
 
 
 class TacticalQuadrantAgent:
-    """Implements the quadrant-based tactical expansion strategy."""
+    """Implements defensive tanks, reinforcements, and peacetime buffing."""
     def __init__(self):
         self._initial_by_id = {}
         self._targeted = {}
         self.current_turn = 0
+        self.last_turn_ships = {}
+        self.last_turn_owner = {}
+        self.last_turn_ejected = {}
 
     def __call__(self, obs, config=None):
         self.current_turn += 1
@@ -160,8 +163,23 @@ class TacticalQuadrantAgent:
         if not self._initial_by_id:
             self._initial_by_id = {p.id: p for p in planets}
 
+        under_attack_ids = set()
+        reinforcement_needs = {}
+        for p in planets:
+            if p.id in getattr(self, 'last_turn_owner', {}) and self.last_turn_owner[p.id] == player and p.owner == player:
+                ejected = self.last_turn_ejected.get(p.id, 0)
+                expected = self.last_turn_ships[p.id] + p.production - ejected
+                if p.ships < expected:
+                    lost = expected - p.ships
+                    under_attack_ids.add(p.id)
+                    reinforcement_needs[p.id] = lost + 1
+
         my_pl = [p for p in planets if p.owner == player]
-        if not my_pl: return []
+        if not my_pl: 
+            self.last_turn_ships = {p.id: p.ships for p in planets}
+            self.last_turn_owner = {p.id: p.owner for p in planets}
+            self.last_turn_ejected = {}
+            return []
 
         def get_quadrant(p):
             cx, cy = CENTER_X, CENTER_Y
@@ -183,141 +201,149 @@ class TacticalQuadrantAgent:
         unocc_moving = [p for p in unoccupied if not is_static_planet(p, self._initial_by_id)]
 
         moves = []
-        all_static = [p for p in planets if is_static_planet(p, self._initial_by_id)]
+        available_ships = {p.id: p.ships for p in my_pl}
 
-        quadrant_static_owned = {}
-        my_static_by_quad = {i: [] for i in range(4)}
-        for p in my_static:
-            my_static_by_quad[get_quadrant(p)].append(p)
+        def aim_and_send(src, tgt, needed_ships):
+            best_aim = None
+            needed = needed_ships
+            for _ in range(4):
+                best_aim = aim_with_prediction(src, tgt, needed, self._initial_by_id, ang_vel)
+                if best_aim is None: break
+                angle, turns, tx, ty = best_aim
+                if tgt.owner == player:
+                    new_needed = needed_ships
+                elif tgt.owner == -1: 
+                    new_needed = tgt.ships + 1
+                else: 
+                    new_needed = int(tgt.ships + tgt.production * turns) + 1
+                if new_needed == needed: break
+                needed = new_needed
 
-        for q in range(4):
-            static_in_q = [p for p in all_static if get_quadrant(p) == q]
-            if not static_in_q:
-                quadrant_static_owned[q] = True
-            else:
-                quadrant_static_owned[q] = all(p.owner == player for p in static_in_q)
-
-        available_ships = {p.id: p.ships for p in my_static}
-        import math
-
-        for q in range(4):
-            if not my_static_by_quad[q]: continue
-
-            my_q_static = my_static_by_quad[q]
-
-            if quadrant_static_owned[q]:
-                prev_q = get_prev_quadrant(q)
-                coming_planets = [p for p in unocc_moving if get_quadrant(p) == prev_q]
-                if coming_planets:
-                    tgt = min(coming_planets, key=lambda cp: min(dist(sp.x, sp.y, cp.x, cp.y) for sp in my_q_static))
-                    for sp in my_q_static:
-                        best_aim = None
-                        needed = tgt.ships + 1
-                        for _ in range(4):
-                            best_aim = aim_with_prediction(sp, tgt, needed, self._initial_by_id, ang_vel)
-                            if best_aim is None: break
-                            angle, turns, tx, ty = best_aim
-                            if tgt.owner == -1: new_needed = tgt.ships + 1
-                            else: new_needed = int(tgt.ships + tgt.production * turns) + 1
-                            if new_needed == needed: break
-                            needed = new_needed
-
-                        if best_aim:
-                            send_amount = math.ceil(needed / len(my_q_static))
-                            if available_ships[sp.id] > send_amount:
-                                moves.append([sp.id, best_aim[0], send_amount])
-                                available_ships[sp.id] -= send_amount
-                                self._targeted[tgt.id] = self.current_turn + turns + 2
-            else:
-                unocc_in_q = [p for p in unocc_static if get_quadrant(p) == q]
-                lowest_my_pop = min(p.ships for p in my_q_static) if my_q_static else 0
-
-                exception_target = None
-                valid_exceptions = [p for p in unocc_moving if get_quadrant(p) == q and p.ships < lowest_my_pop and p.production >= 3]
-                if valid_exceptions:
-                    exception_target = min(valid_exceptions, key=lambda cp: cp.ships)
-
-                for sp in my_q_static:
-                    tgt = None
-                    if exception_target:
-                        tgt = exception_target
-                    elif unocc_in_q:
-                        valid_tgts = [t for t in unocc_in_q if t.ships < available_ships[sp.id]]
-                        if valid_tgts:
-                            tgt = min(valid_tgts, key=lambda t: dist(sp.x, sp.y, t.x, t.y))
-
-                    if tgt:
-                        best_aim = None
-                        needed = tgt.ships + 1
-                        for _ in range(4):
-                            best_aim = aim_with_prediction(sp, tgt, needed, self._initial_by_id, ang_vel)
-                            if best_aim is None: break
-                            angle, turns, tx, ty = best_aim
-                            if tgt.owner == -1: new_needed = tgt.ships + 1
-                            else: new_needed = int(tgt.ships + tgt.production * turns) + 1
-                            if new_needed == needed: break
-                            needed = new_needed
-
-                        if best_aim and available_ships[sp.id] > needed:
-                            moves.append([sp.id, best_aim[0], needed])
-                            available_ships[sp.id] -= needed
-                            self._targeted[tgt.id] = self.current_turn + turns + 2
+            if best_aim and available_ships[src.id] > needed:
+                moves.append([src.id, best_aim[0], needed])
+                available_ships[src.id] -= needed
+                if tgt.owner != player:
+                    self._targeted[tgt.id] = self.current_turn + turns + 2
+                return True
+            return False
 
         for mp in my_moving:
             if not my_static:
                 if unocc_static:
                     tgt = min(unocc_static, key=lambda t: (t.ships, dist(mp.x, mp.y, t.x, t.y)))
+                    aim_and_send(mp, tgt, tgt.ships + 1)
+            else:
+                pass
+
+        my_static_by_quad = {i: [] for i in range(4)}
+        for p in my_static:
+            my_static_by_quad[get_quadrant(p)].append(p)
+
+        all_static = [p for p in planets if is_static_planet(p, self._initial_by_id)]
+        quadrant_static_owned = {}
+        for q in range(4):
+            static_in_q = [p for p in all_static if get_quadrant(p) == q]
+            if not static_in_q: quadrant_static_owned[q] = True
+            else: quadrant_static_owned[q] = all(p.owner == player for p in static_in_q)
+
+        for q in range(4):
+            if not my_static_by_quad[q]: continue
+
+            my_q_static = my_static_by_quad[q]
+            tanks = [p for p in my_q_static if p.production >= 3]
+            small_peeps = [p for p in my_q_static if p.production < 3]
+
+            attacked_in_q = [p for p in my_pl if p.id in under_attack_ids and get_quadrant(p) == q]
+            enemies_in_q = [p for p in unoccupied if get_quadrant(p) == q]
+            heavy_enemies = [p for p in enemies_in_q if p.production >= 3]
+            small_enemies = [p for p in enemies_in_q if p.production < 3]
+
+            # --- Phase 1: Reinforcements ---
+            for target_p in attacked_in_q:
+                needed = reinforcement_needs[target_p.id]
+                helpers = [p for p in my_q_static if p.id != target_p.id]
+                if not helpers: continue
+                send_amount = math.ceil(needed / len(helpers))
+                for helper in helpers:
+                    aim_and_send(helper, target_p, send_amount)
+
+            # --- Phase 2: Defense / Expansion in Quadrant ---
+            if enemies_in_q:
+                for tank in tanks:
+                    tgt = None
+                    valid_heavy = [t for t in heavy_enemies if t.ships < available_ships[tank.id]]
+                    if valid_heavy: tgt = min(valid_heavy, key=lambda t: dist(tank.x, tank.y, t.x, t.y))
+                    if not tgt:
+                        valid_small = [t for t in small_enemies if t.ships < available_ships[tank.id]]
+                        if valid_small: tgt = min(valid_small, key=lambda t: dist(tank.x, tank.y, t.x, t.y))
+                    if tgt: aim_and_send(tank, tgt, tgt.ships + 1)
+
+                for peep in small_peeps:
+                    tgt = None
+                    valid_small = [t for t in small_enemies if t.ships < available_ships[peep.id]]
+                    if valid_small: tgt = min(valid_small, key=lambda t: dist(peep.x, peep.y, t.x, t.y))
+                    if not tgt:
+                        valid_heavy = [t for t in heavy_enemies if t.ships < available_ships[peep.id]]
+                        if valid_heavy: tgt = min(valid_heavy, key=lambda t: dist(peep.x, peep.y, t.x, t.y))
+                    if tgt: aim_and_send(peep, tgt, tgt.ships + 1)
+
+            # --- Phase 3: Prev Quadrant Enemies (Shared Fleets) ---
+            elif quadrant_static_owned[q]:
+                prev_q = get_prev_quadrant(q)
+                coming_planets = [p for p in unocc_moving if get_quadrant(p) == prev_q]
+                if coming_planets:
+                    tgt = min(coming_planets, key=lambda cp: min(dist(sp.x, sp.y, cp.x, cp.y) for sp in my_q_static))
+                    sp0 = my_q_static[0]
                     best_aim = None
                     needed = tgt.ships + 1
                     for _ in range(4):
-                        best_aim = aim_with_prediction(mp, tgt, needed, self._initial_by_id, ang_vel)
+                        best_aim = aim_with_prediction(sp0, tgt, needed, self._initial_by_id, ang_vel)
                         if best_aim is None: break
-                        angle, turns, tx, ty = best_aim
+                        _, turns, _, _ = best_aim
                         if tgt.owner == -1: new_needed = tgt.ships + 1
                         else: new_needed = int(tgt.ships + tgt.production * turns) + 1
                         if new_needed == needed: break
                         needed = new_needed
-                    if best_aim and mp.ships > needed:
-                        moves.append([mp.id, best_aim[0], needed])
-                        self._targeted[tgt.id] = self.current_turn + turns + 2
-            else:
+
+                    if best_aim:
+                        send_amount = math.ceil(needed / len(my_q_static))
+                        for sp in my_q_static:
+                            aim_and_send(sp, tgt, send_amount)
+
+            # --- Phase 4: Peacetime Buff ---
+            if not enemies_in_q:
+                prev_q = get_prev_quadrant(q)
+                enemies_in_prev = [p for p in unoccupied if get_quadrant(p) == prev_q]
+                if not enemies_in_prev:
+                    for tank in tanks:
+                        weak_peeps = [p for p in small_peeps if p.ships < 30 and available_ships[p.id] < 30]
+                        if weak_peeps:
+                            tgt = min(weak_peeps, key=lambda p: p.ships)
+                            send_amount = max(1, int(tank.production * 1))
+                            aim_and_send(tank, tgt, send_amount)
+
+        # Moving planets normal logic
+        for mp in my_moving:
+            if my_static:
                 q = get_quadrant(mp)
                 if quadrant_static_owned[q]:
                     if unocc_moving:
                         tgt = min(unocc_moving, key=lambda t: dist(mp.x, mp.y, t.x, t.y))
-                        best_aim = None
-                        needed = tgt.ships + 1
-                        for _ in range(4):
-                            best_aim = aim_with_prediction(mp, tgt, needed, self._initial_by_id, ang_vel)
-                            if best_aim is None: break
-                            angle, turns, tx, ty = best_aim
-                            if tgt.owner == -1: new_needed = tgt.ships + 1
-                            else: new_needed = int(tgt.ships + tgt.production * turns) + 1
-                            if new_needed == needed: break
-                            needed = new_needed
-                        if best_aim and mp.ships > needed:
-                            moves.append([mp.id, best_aim[0], needed])
-                            self._targeted[tgt.id] = self.current_turn + turns + 2
+                        aim_and_send(mp, tgt, tgt.ships + 1)
                 else:
                     unocc_static_in_q = [p for p in unocc_static if get_quadrant(p) == q]
                     if unocc_static_in_q:
                         tgt = min(unocc_static_in_q, key=lambda t: dist(mp.x, mp.y, t.x, t.y))
-                        best_aim = None
-                        needed = tgt.ships + 1
-                        for _ in range(4):
-                            best_aim = aim_with_prediction(mp, tgt, needed, self._initial_by_id, ang_vel)
-                            if best_aim is None: break
-                            angle, turns, tx, ty = best_aim
-                            if tgt.owner == -1: new_needed = tgt.ships + 1
-                            else: new_needed = int(tgt.ships + tgt.production * turns) + 1
-                            if new_needed == needed: break
-                            needed = new_needed
-                        if best_aim and mp.ships > needed:
-                            moves.append([mp.id, best_aim[0], needed])
-                            self._targeted[tgt.id] = self.current_turn + turns + 2
+                        aim_and_send(mp, tgt, tgt.ships + 1)
+
+        self.last_turn_ships = {p.id: p.ships for p in planets}
+        self.last_turn_owner = {p.id: p.owner for p in planets}
+        self.last_turn_ejected = {}
+        for move in moves:
+            src_id, angle, ships = move
+            self.last_turn_ejected[src_id] = self.last_turn_ejected.get(src_id, 0) + ships
 
         return moves
-
 
 agent_instance = TacticalQuadrantAgent()
 def agent(obs, config=None):
