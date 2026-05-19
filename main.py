@@ -158,10 +158,13 @@ class TacticalQuadrantAgent:
         player = obs.player if hasattr(obs, "player") else obs.get("player", 0)
         raw_p  = obs.planets if hasattr(obs, "planets") else obs.get("planets", [])
         ang_vel = obs.angular_velocity if hasattr(obs, "angular_velocity") else obs.get("angular_velocity", 0.03)
-        planets = [Planet(*p) for p in raw_p]
+        comet_ids = set(obs.comet_planet_ids if hasattr(obs, "comet_planet_ids") else obs.get("comet_planet_ids", []))
+
+        all_planets = [Planet(*p) for p in raw_p]
+        planets = [p for p in all_planets if p.id not in comet_ids]
 
         if not self._initial_by_id:
-            self._initial_by_id = {p.id: p for p in planets}
+            self._initial_by_id = {p.id: p for p in all_planets}
 
         under_attack_ids = set()
         reinforcement_needs = {}
