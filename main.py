@@ -159,6 +159,10 @@ class TacticalQuadrantAgent:
         raw_p  = obs.planets if hasattr(obs, "planets") else obs.get("planets", [])
         ang_vel = obs.angular_velocity if hasattr(obs, "angular_velocity") else obs.get("angular_velocity", 0.03)
         comet_ids = set(obs.comet_planet_ids if hasattr(obs, "comet_planet_ids") else obs.get("comet_planet_ids", []))
+        
+        raw_fleets = obs.fleets if hasattr(obs, "fleets") else obs.get("fleets", [])
+        enemy_fleets = [f for f in raw_fleets if f[1] != player and f[1] != -1]
+        vulnerable_planet_ids = {f[5] for f in enemy_fleets if len(f) > 5 and f[5] is not None}
 
         all_planets = [Planet(*p) for p in raw_p]
         planets = [p for p in all_planets if p.id not in comet_ids]
@@ -196,6 +200,10 @@ class TacticalQuadrantAgent:
             if ang_vel >= 0: return (q - 1) % 4
             else: return (q + 1) % 4
 
+        def get_next_quadrant(q):
+            if ang_vel >= 0: return (q + 1) % 4
+            else: return (q - 1) % 4
+
         my_static = [p for p in my_pl if is_static_planet(p, self._initial_by_id)]
         my_moving = [p for p in my_pl if not is_static_planet(p, self._initial_by_id)]
 
@@ -206,25 +214,48 @@ class TacticalQuadrantAgent:
         moves = []
         available_ships = {p.id: p.ships for p in my_pl}
 
-        def aim_and_send(src, tgt, needed_ships):
+        def aim_and_send(src, tgt, min_needed_ships):
             best_aim = None
-            needed = needed_ships
+            is_attack = (tgt.owner != player)
+            
+            if is_attack:
+                reserve = max(1, int(available_ships[src.id] * 0.05))
+                send_ships = max(min_needed_ships, available_ships[src.id] - reserve)
+            else:
+                send_ships = min_needed_ships
+            
+            if send_ships > available_ships[src.id]:
+                return False
+
+            needed = min_needed_ships
             for _ in range(4):
-                best_aim = aim_with_prediction(src, tgt, needed, self._initial_by_id, ang_vel)
+                best_aim = aim_with_prediction(src, tgt, send_ships, self._initial_by_id, ang_vel)
                 if best_aim is None: break
                 angle, turns, tx, ty = best_aim
+                
                 if tgt.owner == player:
-                    new_needed = needed_ships
+                    new_needed = min_needed_ships
                 elif tgt.owner == -1: 
                     new_needed = tgt.ships + 1
                 else: 
                     new_needed = int(tgt.ships + tgt.production * turns) + 1
-                if new_needed == needed: break
-                needed = new_needed
+                
+                if new_needed <= send_ships:
+                    needed = new_needed
+                    break
+                else:
+                    if new_needed > available_ships[src.id]:
+                        best_aim = None
+                        break
+                    if is_attack:
+                        send_ships = max(new_needed, available_ships[src.id] - reserve)
+                    else:
+                        send_ships = new_needed
+                    needed = new_needed
 
-            if best_aim and available_ships[src.id] > needed:
-                moves.append([src.id, best_aim[0], needed])
-                available_ships[src.id] -= needed
+            if best_aim and available_ships[src.id] >= send_ships:
+                moves.append([src.id, best_aim[0], send_ships])
+                available_ships[src.id] -= send_ships
                 if tgt.owner != player:
                     self._targeted[tgt.id] = self.current_turn + turns + 2
                 return True
@@ -260,6 +291,7 @@ class TacticalQuadrantAgent:
             enemies_in_q = [p for p in unoccupied if get_quadrant(p) == q]
             heavy_enemies = [p for p in enemies_in_q if p.production >= 3]
             small_enemies = [p for p in enemies_in_q if p.production < 3]
+            vulnerable_enemies_in_q = [p for p in enemies_in_q if p.id in vulnerable_planet_ids]
 
             # --- Phase 1: Reinforcements ---
             for target_p in attacked_in_q:
@@ -270,23 +302,36 @@ class TacticalQuadrantAgent:
                 for helper in helpers:
                     aim_and_send(helper, target_p, send_amount)
 
+            # --- Phase 1.5: Punish Vulnerable Enemies ---
+            if vulnerable_enemies_in_q:
+                for tank in tanks:
+                    valid_vuln = [t for t in vulnerable_enemies_in_q if t.ships < available_ships[tank.id]]
+                    if valid_vuln:
+                        tgt = min(valid_vuln, key=lambda t: dist(tank.x, tank.y, t.x, t.y))
+                        aim_and_send(tank, tgt, tgt.ships + 1)
+                for peep in small_peeps:
+                    valid_vuln = [t for t in vulnerable_enemies_in_q if t.ships < available_ships[peep.id]]
+                    if valid_vuln:
+                        tgt = min(valid_vuln, key=lambda t: dist(peep.x, peep.y, t.x, t.y))
+                        aim_and_send(peep, tgt, tgt.ships + 1)
+
             # --- Phase 2: Defense / Expansion in Quadrant ---
             if enemies_in_q:
                 for tank in tanks:
                     tgt = None
-                    valid_heavy = [t for t in heavy_enemies if t.ships < available_ships[tank.id]]
-                    if valid_heavy: tgt = min(valid_heavy, key=lambda t: dist(tank.x, tank.y, t.x, t.y))
+                    valid_small = [t for t in small_enemies if t.ships < available_ships[tank.id] and t.id not in vulnerable_planet_ids]
+                    if valid_small: tgt = min(valid_small, key=lambda t: dist(tank.x, tank.y, t.x, t.y))
                     if not tgt:
-                        valid_small = [t for t in small_enemies if t.ships < available_ships[tank.id]]
-                        if valid_small: tgt = min(valid_small, key=lambda t: dist(tank.x, tank.y, t.x, t.y))
+                        valid_heavy = [t for t in heavy_enemies if t.ships < available_ships[tank.id] and t.id not in vulnerable_planet_ids]
+                        if valid_heavy: tgt = min(valid_heavy, key=lambda t: dist(tank.x, tank.y, t.x, t.y))
                     if tgt: aim_and_send(tank, tgt, tgt.ships + 1)
 
                 for peep in small_peeps:
                     tgt = None
-                    valid_small = [t for t in small_enemies if t.ships < available_ships[peep.id]]
+                    valid_small = [t for t in small_enemies if t.ships < available_ships[peep.id] and t.id not in vulnerable_planet_ids]
                     if valid_small: tgt = min(valid_small, key=lambda t: dist(peep.x, peep.y, t.x, t.y))
                     if not tgt:
-                        valid_heavy = [t for t in heavy_enemies if t.ships < available_ships[peep.id]]
+                        valid_heavy = [t for t in heavy_enemies if t.ships < available_ships[peep.id] and t.id not in vulnerable_planet_ids]
                         if valid_heavy: tgt = min(valid_heavy, key=lambda t: dist(peep.x, peep.y, t.x, t.y))
                     if tgt: aim_and_send(peep, tgt, tgt.ships + 1)
 
@@ -312,18 +357,54 @@ class TacticalQuadrantAgent:
                         send_amount = math.ceil(needed / len(my_q_static))
                         for sp in my_q_static:
                             aim_and_send(sp, tgt, send_amount)
+                else:
+                    # --- Phase 3.5: Next Quadrant Sniping ---
+                    next_q = get_next_quadrant(q)
+                    next_q_static_unocc = [p for p in unocc_static if get_quadrant(p) == next_q]
+                    if next_q_static_unocc:
+                        vulnerable_next = [p for p in next_q_static_unocc if p.id in vulnerable_planet_ids]
+                        small_next = [p for p in next_q_static_unocc if p.production < 3]
+                        heavy_next = [p for p in next_q_static_unocc if p.production >= 3]
+                        
+                        for tank in tanks:
+                            tgt = None
+                            valid_vuln = [t for t in vulnerable_next if t.ships < available_ships[tank.id]]
+                            if valid_vuln: tgt = min(valid_vuln, key=lambda t: dist(tank.x, tank.y, t.x, t.y))
+                            if not tgt:
+                                valid_small = [t for t in small_next if t.ships < available_ships[tank.id]]
+                                if valid_small: tgt = min(valid_small, key=lambda t: dist(tank.x, tank.y, t.x, t.y))
+                            if not tgt:
+                                valid_heavy = [t for t in heavy_next if t.ships < available_ships[tank.id]]
+                                if valid_heavy: tgt = min(valid_heavy, key=lambda t: dist(tank.x, tank.y, t.x, t.y))
+                            if tgt: aim_and_send(tank, tgt, tgt.ships + 1)
+                        
+                        for peep in small_peeps:
+                            tgt = None
+                            valid_vuln = [t for t in vulnerable_next if t.ships < available_ships[peep.id]]
+                            if valid_vuln: tgt = min(valid_vuln, key=lambda t: dist(peep.x, peep.y, t.x, t.y))
+                            if not tgt:
+                                valid_small = [t for t in small_next if t.ships < available_ships[peep.id]]
+                                if valid_small: tgt = min(valid_small, key=lambda t: dist(peep.x, peep.y, t.x, t.y))
+                            if tgt: aim_and_send(peep, tgt, tgt.ships + 1)
 
             # --- Phase 4: Peacetime Buff ---
             if not enemies_in_q:
-                prev_q = get_prev_quadrant(q)
-                enemies_in_prev = [p for p in unoccupied if get_quadrant(p) == prev_q]
-                if not enemies_in_prev:
+                my_moving_in_q = [p for p in my_moving if get_quadrant(p) == q]
+                if my_moving_in_q:
                     for tank in tanks:
-                        weak_peeps = [p for p in small_peeps if p.ships < 30 and available_ships[p.id] < 30]
-                        if weak_peeps:
-                            tgt = min(weak_peeps, key=lambda p: p.ships)
-                            send_amount = max(1, int(tank.production * 1))
-                            aim_and_send(tank, tgt, send_amount)
+                        tgt = min(my_moving_in_q, key=lambda p: dist(tank.x, tank.y, p.x, p.y))
+                        send_amount = max(1, int(tank.production * 2))
+                        aim_and_send(tank, tgt, send_amount)
+                else:
+                    prev_q = get_prev_quadrant(q)
+                    enemies_in_prev = [p for p in unoccupied if get_quadrant(p) == prev_q]
+                    if not enemies_in_prev:
+                        for tank in tanks:
+                            weak_peeps = [p for p in small_peeps if p.ships < 30 and available_ships[p.id] < 30]
+                            if weak_peeps:
+                                tgt = min(weak_peeps, key=lambda p: p.ships)
+                                send_amount = max(1, int(tank.production * 1))
+                                aim_and_send(tank, tgt, send_amount)
 
         # Moving planets normal logic
         for mp in my_moving:

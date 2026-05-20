@@ -33,23 +33,32 @@ For every quadrant we have a presence in:
 - They calculate the exact number of ships the attacked planet lost (plus 1) and divide that burden evenly among themselves.
 - They immediately send these reinforcements to rebuild the attacked planet's garrison.
 
-### Phase 3: Invader Defense (Heavy vs Heavy)
-If enemy planets (either moving or static) are detected inside our quadrant:
-- **Tanks** seek out and attack **Heavy Enemy Producers** (`production >= 3`) in the quadrant. If none exist, they help clean up small enemies.
-- **Small Peeps** seek out and attack **Small Enemy Producers** (`production < 3`) in the quadrant. If none exist, they help swarm the heavy enemies.
+### Phase 1.5: Bait and Punish (Vulnerable Target Sniping)
+Before attacking normal targets, the agent scans the entire system for enemy fleets currently in transit.
+- It identifies the exact enemy planet that launched those fleets (`from_planet_id`).
+- These planets are flagged as **Vulnerable** because their garrisons are depleted.
+- Both **Tanks** and **Small Peeps** will immediately drop other offensive priorities to snipe these vulnerable planets in their quadrant or the next quadrant.
 
-### Phase 4: Shared Fleet Anticipation
+### Phase 2: Invader Defense (Baiting)
+If enemy planets (either moving or static) are detected inside our quadrant:
+- **Tanks** seek out and attack **Small Enemy Producers** (`production < 3`) first. This acts as bait—forcing the enemy to send support fleets (which we punish in Phase 1.5). If no small targets exist, they attack heavy producers.
+- **Small Peeps** also prioritize **Small Enemy Producers**, swarming them, or helping with heavy enemies if needed.
+
+### Phase 3: Shared Fleet Anticipation
 If our quadrant is completely secure (we own all stationary planets in it):
 - The agent looks at the **Previous Quadrant** to find unowned or enemy moving planets that are rotating towards us.
-- It calculates the ships needed to capture the most threatening incoming planet.
-- It divides this cost evenly among all our stationary planets in the home quadrant.
-- A massive, perfectly synchronized **Shared Fleet** is launched to intercept the incoming planet before it becomes a problem.
+- A massive, perfectly synchronized **Shared Fleet** is launched from all our stationary planets in the home quadrant to intercept the incoming planet before it becomes a problem.
 
-### Phase 5: Peacetime Buffing (Support Network)
-If our quadrant is completely secure, AND there are no enemies approaching from the previous quadrant:
-- It is officially peacetime.
-- **Tanks** look for friendly **Small Peeps** in their quadrant that have a dangerously low population (less than 30 ships).
-- Tanks will send exactly 1 turn's worth of their production as a care package to buff the Small Peeps' defenses against future attacks.
+### Phase 3.5: Next Quadrant Expansion
+If our quadrant is secure AND there are no incoming threats from the previous quadrant:
+- The agent looks forward into the **Next Quadrant**.
+- It identifies any stationary planets we don't own (neutral or enemy-occupied).
+- Our stationary planets launch coordinated strikes to snipe these targets and begin aggressive expansion, prioritizing vulnerable or small targets first.
+
+### Phase 4: Peacetime Buffing (Support Network)
+If there are no immediate threats in the quadrant:
+- **Tanks** first look for **Friendly Moving Planets (Comets)** currently traveling through their quadrant. They will send a large buff (2 turns of production) to reinforce the comet before it ventures into enemy territory.
+- If no comets are around and no enemies are in the previous quadrant, Tanks look for friendly **Small Peeps** with dangerously low populations (less than 30 ships) and send 1 turn's worth of production as a care package.
 
 ### Phase 6: Exploration (Moving Planets)
 Moving planets that wander outside of our fully secured quadrants act as explorers:
