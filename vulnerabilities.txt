@@ -1,0 +1,245 @@
+================================================================================
+           STRATEGIC VULNERABILITY ANALYSIS — TacticalQuadrantAgent
+                         (Brutally Honest Edition)
+================================================================================
+
+1. QUADRANT RIGIDITY — YOUR FATAL FLAW
+--------------------------------------
+Your entire strategy is built on a 4-quadrant grid centered on the sun. This
+is a geometry that has NOTHING to do with how Orbit Wars actually plays out.
+Planets don't respect quadrant boundaries. A planet 1 pixel inside Q0 and a
+planet 1 pixel inside Q1 are treated as belonging to entirely different
+strategic zones, even though they might be 2 pixels apart. Meanwhile, two
+planets at opposite corners of the same quadrant (70+ distance apart) are
+"teammates."
+
+An opponent who ignores quadrants and just plays position-based strategy will
+out-maneuver you because they see the ACTUAL board, not an artificial overlay.
+
+Your quadrant logic also creates hard seams: planets near boundaries get
+sub-optimal orders because they're assigned to the "wrong" quadrant relative
+to where the actual fight is.
+
+
+2. NO FLEET TRACKING / NO INCOMING THREAT ASSESSMENT
+-----------------------------------------------------
+You only detect attacks AFTER they land (by comparing expected vs actual ship
+counts next turn). By then the damage is done. You have zero ability to:
+
+  - See an incoming enemy fleet 10 turns away and pre-reinforce
+  - Predict which of your planets will be hit next
+  - Abort a doomed attack when enemy reinforcements are en route
+  - Dodge or intercept enemy fleets
+
+You have access to obs.fleets. You partially use it to identify
+"vulnerable_planet_ids" (planets enemy fleets launched FROM), but you
+completely ignore WHERE those fleets are heading. You could trivially
+compute fleet trajectories and predict arrival targets. You don't.
+
+Any competent opponent who checks incoming fleets will pre-stack defenses
+and you'll waste ships on doomed attacks.
+
+
+3. ZERO COORDINATION — EVERY PLANET IS AN ISLAND
+-------------------------------------------------
+Your "shared fleet" logic (Phase 3) is the only multi-planet coordination,
+and it's primitive: split ships evenly across all static planets in a
+quadrant regardless of distance, timing, or whether the fleet will even
+arrive together.
+
+Real coordination means: multiple planets launching fleets that ARRIVE AT
+THE SAME TIME on the same target. You never do this. Your attacks are serial
+— each planet individually decides to send ships. An opponent with even
+basic defensive awareness will pick off your dribbling fleets one by one.
+
+
+4. ATTACK SIZING IS BROKEN
+---------------------------
+For attacks, you send: max(min_needed, available - 5% reserve).
+
+This means you almost always send EVERYTHING. The 5% reserve is a joke —
+on a planet with 100 ships, you keep 5. One enemy fleet of 6 ships takes
+your planet.
+
+You have no concept of:
+  - "How many ships do I need to HOLD this planet after capturing it?"
+  - "Is this attack even worth it given what I'll lose at home?"
+  - "Should I save ships for a bigger coordinated push?"
+
+You're a gambler who goes all-in every hand. Against any opponent who
+counter-attacks your emptied planets, you'll hemorrhage territory.
+
+
+5. NO PRIORITY SYSTEM — YOU ATTACK WHATEVER IS CLOSEST
+-------------------------------------------------------
+Your target selection is almost entirely "nearest enemy." This is greedy
+pathfinding, not strategy. You don't consider:
+
+  - Production value of targets (a radius-5 planet is worth 5x a radius-1)
+  - Cost-to-benefit ratio (cheap neutrals vs expensive enemy fortresses)
+  - Strategic position (controlling chokepoints, cutting supply lines)
+  - Whether you're about to take a planet that 2 other opponents are also
+    attacking (wasting ships in a 3-way fight)
+
+A smart opponent will bait you with cheap planets in bad positions while
+they grab all the high-production real estate.
+
+
+6. MOVING PLANET STRATEGY IS ALMOST NONEXISTENT
+-------------------------------------------------
+Moving planets are your MOST VALUABLE early-game assets (they're close to
+the center, often high production), and your logic for them is:
+
+  - If you have no static planets: send moving planet ships to the
+    nearest unoccupied static planet. Fine.
+  - If you DO have static planets and own the quadrant: attack nearest
+    unoccupied moving planet. Okay.
+  - Otherwise: attack nearest static planet in same quadrant.
+
+That's it. You have no logic for:
+  - Using moving planets as mobile strike platforms
+  - Timing attacks based on orbital position
+  - Defending moving planets
+  - Recognizing that a moving planet will orbit INTO enemy territory
+
+Moving planets rotate. Their strategic value changes every turn based on
+where they are. You treat them like static planets that happen to wiggle.
+
+
+7. PEACETIME BUFFING IS WASTEFUL
+---------------------------------
+When a quadrant has no enemies, your tanks send production*2 ships to
+the nearest moving planet, or production*1 to the weakest small planet.
+
+This is busywork. Those ships are IN TRANSIT and contributing nothing.
+If an attack comes during transit, those ships are wasted. Stockpiling
+on your highest-production planet (to launch a massive coordinated strike
+later) would almost always be better than dribbling ships around during
+"peace."
+
+
+8. NO ENDGAME AWARENESS
+-------------------------
+You have zero concept of the game timer or score. When time is running out,
+the optimal strategy changes dramatically:
+
+  - If you're winning: turtle up, stop attacking, preserve ships
+  - If you're losing: go all-in on high-value targets
+  - In close games: every ship matters, stop wasting on marginal attacks
+
+You play the exact same way on turn 1 and turn 299. This is a massive
+leak against any opponent who adjusts for endgame.
+
+
+9. REINFORCEMENT LOGIC IS REACTIVE AND DUMB
+---------------------------------------------
+You detect attacks by noticing ship count drops AFTER combat.
+Then you split reinforcement needs evenly across all helpers in the
+quadrant.
+
+Problems:
+  - The attack already landed. Reinforcements arrive turns later.
+  - You don't check if the planet is even worth saving
+  - You don't check if reinforcements will arrive in time
+  - Equal splitting means distant planets waste ships on long trips
+    while nearby planets could have handled it alone
+  - You reinforce planets that are about to be hit AGAIN
+
+
+10. VULNERABLE PLANET EXPLOITATION IS SHALLOW
+----------------------------------------------
+You identify planets that enemy fleets launched from (vulnerable_planet_ids)
+and opportunistically attack them. Good idea. But:
+
+  - You don't track HOW MANY ships left that planet
+  - You don't estimate the current garrison
+  - You don't time your attack to arrive when the planet is weakest
+  - You attack them with the same nearest-first greedy logic
+
+A real exploit would be: "Planet X just sent 80% of its ships away.
+I can calculate exactly how many it has now. I know my fleet will arrive
+in N turns during which it produces M ships. I need exactly M + remaining
++ 1 ships." You don't do any of this math.
+
+
+11. NO MULTI-PLAYER AWARENESS
+------------------------------
+This is a 4-player game. You treat every non-you player identically.
+You don't consider:
+
+  - Who is winning (and therefore the biggest threat)
+  - Who is fighting whom (let them weaken each other)
+  - Temporary alliances of convenience (don't attack the player who's
+    keeping your rival busy)
+  - Third-party interference (don't attack a planet that Player 3 is
+    about to take — let them waste ships, then take it from them)
+
+You're playing 3 separate 1v1s simultaneously instead of one 4-player game.
+
+
+12. SUN AVOIDANCE IS BINARY — NO WAYPOINT ROUTING
+--------------------------------------------------
+If a direct path to a target hits the sun, you return None (for static
+planets) or fall back to intercept search. You never consider:
+
+  - Sending to an intermediate planet first, then forwarding
+  - Choosing an angle that arcs around the sun (fleet paths are straight,
+    but you could choose a relay point)
+  - Whether the planet will rotate to a sun-safe angle soon
+
+You just give up on anything behind the sun. Opponents on the far side
+of the board are effectively immune to you until orbital mechanics
+accidentally clear a path.
+
+
+13. PRODUCTION VALUE IS IGNORED IN TARGETING
+---------------------------------------------
+You never factor planet.production into attack decisions. A production-5
+planet defended by 20 ships is VASTLY more valuable than a production-1
+planet defended by 5 ships. But your agent treats the 5-ship planet as
+the better target because it's "easier."
+
+Over 300 turns, production compounds. Ignoring it means you grab junk
+planets while opponents grab powerhouses.
+
+
+14. _targeted DICT LEAKS STALE STATE
+--------------------------------------
+You mark planets as "targeted" with an expiry of current_turn + turns + 2.
+But:
+  - If your fleet gets destroyed by the sun or combat, the target stays
+    locked until expiry — nobody else attacks it
+  - If the target changes owner before your fleet arrives, you don't
+    re-evaluate
+  - Multiple planets might need to attack the same target for
+    coordinated assaults, but _targeted prevents this
+
+The targeting lock is a blunt instrument that causes missed opportunities.
+
+
+15. NO COMET EXPLOITATION
+--------------------------
+You explicitly FILTER OUT comets: planets = [p for p in all_planets
+if p.id not in comet_ids]. Comets are temporary planets flying through
+the board. They can be:
+
+  - Free ship sources if neutral and weakly defended
+  - Mobile strike platforms if captured
+  - Threats if captured by enemies
+
+You completely ignore them. Any opponent who grabs a comet passing
+through your territory gets a free forward base.
+
+
+================================================================================
+SUMMARY: Your agent is a decent "expand to nearest, defend reactively"
+bot that will beat random/do-nothing opponents. But against any opponent
+with fleet tracking, coordinated attacks, production-weighted targeting,
+or endgame awareness, you will lose. The quadrant system creates artificial
+blindness, the all-in attack sizing leaves you perpetually exposed, and
+the complete absence of incoming fleet prediction means you're always
+reacting one turn too late.
+
+The single most impactful fix: TRACK INCOMING FLEETS. Know what's coming,
+when it's arriving, and where. Everything else flows from that.
+================================================================================

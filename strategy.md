@@ -1,74 +1,91 @@
-# Tactical Quadrant Defensive Agent: Comprehensive Strategy
+# Strategy — TacticalQuadrantAgent (Hardened v2)
 
-This document outlines the complete, step-by-step strategy executed by your `TacticalQuadrantAgent` in the game of Orbit Wars.
+## Architecture Overview
 
-## 1. Core Concepts & Definitions
-- **Quadrants:** The game board is divided into 4 quadrants relative to the center (0, 1, 2, 3). The agent organizes all of its operations quadrant-by-quadrant.
-- **Previous Quadrant:** Calculated based on the rotational direction (`angular_velocity`). This is the quadrant from which moving planets will inevitably enter our "home" quadrant.
-- **Tanks:** Friendly stationary planets that are heavy producers (`production >= 3`).
-- **Small Peeps:** Friendly stationary planets that are low producers (`production < 3`).
-- **Target Lock:** To avoid wasting ships, the agent remembers which planets it recently sent a fleet to. A target is locked and ignored for `ETA + 2 turns` to give the fleet time to arrive and conquer.
+The agent operates in five sequential phases every turn, combining **predictive tracking**, **distance-aware defense**, and **quadrant-based expansion**.
 
 ---
 
-## 2. Turn Execution Flow
-Every turn, the agent processes information and executes actions in the following strict priority order:
+## Phase 0 — Predictive Fleet Tracking (Global, runs first)
 
-### Phase 0: Attack Detection (Sudden Drop Logic)
-Before making any moves, the agent audits the garrison (ship count) of every planet we own.
-- It compares the current ships against what was expected (last turn's ships + production - ships we sent away).
-- If a planet has strictly *fewer* ships than expected, it means an enemy fleet struck it.
-- The planet is instantly flagged as **Under Attack** and the exact number of lost ships is recorded.
+Before any expansion logic:
 
-### Phase 1: Initial Expansion (The Genesis Protocol)
-If the game starts and we **do not own any stationary planets** (our main planet is moving):
-- Our moving planet scans the entire board globally.
-- It targets the unowned stationary planet that minimizes a combination of **lowest population** and **closest distance**.
-- Once that planet is captured, its quadrant officially becomes our first "Home Quadrant," and the rest of the strategy kicks in.
+1. **Incoming Fleet Detection**: Every enemy fleet in space has its angle compared against the direction to each friendly planet. If the angle difference is < 0.2 radians, the fleet is flagged as incoming and its ship count is added to `threatened_planets[planet_id]`.
 
-### Phase 2: Emergency Reinforcements (Highest Priority)
-For every quadrant we have a presence in:
-- The agent checks if any friendly planets in this quadrant were flagged as **Under Attack** in Phase 0.
-- If so, all other friendly stationary planets in that same quadrant pause their offensive plans.
-- They calculate the exact number of ships the attacked planet lost (plus 1) and divide that burden evenly among themselves.
-- They immediately send these reinforcements to rebuild the attacked planet's garrison.
+2. **Vulnerable Enemy Detection**: An enemy planet is considered "vulnerable" if:
+   - It is the **source** of an active enemy fleet in space (just spent ships), OR
+   - Its current garrison is **below 20 ships**
 
-### Phase 1.5: Bait and Punish (Vulnerable Target Sniping)
-Before attacking normal targets, the agent scans the entire system for enemy fleets currently in transit.
-- It identifies the exact enemy planet that launched those fleets (`from_planet_id`).
-- These planets are flagged as **Vulnerable** because their garrisons are depleted.
-- Both **Tanks** and **Small Peeps** will immediately drop other offensive priorities to snipe these vulnerable planets in their quadrant or the next quadrant.
+3. **Cross-Quadrant Defense (Fix #6)**: For each threatened friendly planet, the agent sorts **all friendly planets** by distance (ignoring quadrant boundaries) and sends reinforcements from the closest available helpers — up to half of their garrison.
 
-### Phase 2: Invader Defense (Baiting)
-If enemy planets (either moving or static) are detected inside our quadrant:
-- **Tanks** seek out and attack **Small Enemy Producers** (`production < 3`) first. This acts as bait—forcing the enemy to send support fleets (which we punish in Phase 1.5). If no small targets exist, they attack heavy producers.
-- **Small Peeps** also prioritize **Small Enemy Producers**, swarming them, or helping with heavy enemies if needed.
-
-### Phase 3: Shared Fleet Anticipation
-If our quadrant is completely secure (we own all stationary planets in it):
-- The agent looks at the **Previous Quadrant** to find unowned or enemy moving planets that are rotating towards us.
-- A massive, perfectly synchronized **Shared Fleet** is launched from all our stationary planets in the home quadrant to intercept the incoming planet before it becomes a problem.
-
-### Phase 3.5: Next Quadrant Expansion
-If our quadrant is secure AND there are no incoming threats from the previous quadrant:
-- The agent looks forward into the **Next Quadrant**.
-- It identifies any stationary planets we don't own (neutral or enemy-occupied).
-- Our stationary planets launch coordinated strikes to snipe these targets and begin aggressive expansion, prioritizing vulnerable or small targets first.
-
-### Phase 4: Peacetime Buffing (Support Network)
-If there are no immediate threats in the quadrant:
-- **Tanks** first look for **Friendly Moving Planets (Comets)** currently traveling through their quadrant. They will send a large buff (2 turns of production) to reinforce the comet before it ventures into enemy territory.
-- If no comets are around and no enemies are in the previous quadrant, Tanks look for friendly **Small Peeps** with dangerously low populations (less than 30 ships) and send 1 turn's worth of production as a care package.
-
-### Phase 6: Exploration (Moving Planets)
-Moving planets that wander outside of our fully secured quadrants act as explorers:
-- They actively hunt for the closest unowned stationary planets in whatever quadrant they are currently flying through.
-- If their current quadrant is already fully owned by us, they aggressively target the closest unowned moving planets instead.
+4. **Garrison-Drop Fallback**: The classic 1-turn-delayed detection (comparing last turn vs current ships) is kept as a secondary fallback reinforcement system.
 
 ---
 
-## 3. Launch Conditions
-No fleet is ever launched recklessly. For a planet to execute *any* of the attacks or reinforcements listed above, it must verify:
-1. It has a sun-safe flight path.
-2. It currently has enough available ships to successfully fulfill its share of the attack (meaning it won't send piecemeal fleets that just bounce off the enemy's defenses).
-3. The target isn't already "Target Locked" by a previous launch.
+## Phase 1 — Reactive Reinforcements (Per-Quadrant)
+
+If a planet's garrison dropped unexpectedly (garrison-drop detection), same-quadrant static planets split the reinforcement deficit evenly and send help.
+
+---
+
+## Phase 1.5 — Punish Vulnerable Enemies
+
+If an enemy planet in the current quadrant is flagged as vulnerable (low garrison or just launched), **tanks attack first** followed by **small peeps** — targeting the closest vulnerable enemy they can defeat.
+
+The 95% "Snipe Bullet" (`is_snipe=True`) only fires against **enemy-owned** planets, never against neutral planets (Fix #4).
+
+---
+
+## Phase 2 — Quadrant Expansion
+
+When enemies exist in the quadrant, every planet targets the **highest-production, lowest-population** enemy it can defeat. Priority order: `(-production, ships, distance)`.
+
+No planet sends a second fleet to the same target in the same turn thanks to the `sent_targets` set (Fix #5).
+
+---
+
+## Phase 3 — Intercept Moving Planets
+
+If the quadrant is fully owned and a moving planet is approaching from the previous quadrant, every static planet independently calculates its **own intercept angle** (Fix #7) and fires on the incoming target.
+
+### Phase 3.5 — Next-Quadrant Sniping
+
+If no incoming moving planets exist and the quadrant is fully owned, tanks and peeps fire at **vulnerable or high-production targets** in the next quadrant.
+
+---
+
+## Phase 4 — Peacetime Buff (Fixed #8)
+
+When no enemies are present in the quadrant:
+- If moving planets are nearby → buff them with ships (they'll carry into enemy territory)
+- If no moving planets → tanks transfer ships to under-powered peeps proportionally:
+  `send = 30% of the gap between tank ships and peep ships`
+  No more hardcoded 30-ship cap.
+
+---
+
+## Moving Planets (Mid-Game) — Fixed #1 & #10
+
+Moving planets are **always active** regardless of whether static planets exist:
+1. **Priority 1**: Closest unoccupied or enemy planet in the next quadrant (high-prod first)
+2. **Priority 2**: Closest unoccupied planet anywhere on the entire board
+
+---
+
+## End-Game Awareness (Fix #9)
+
+After turn **950**, `aim_and_send` rejects any fleet that will not land before turn **1000**. This prevents bleeding ships into space in the final countdown.
+
+---
+
+## Key Design Decisions
+
+| Feature | Detail |
+|---------|--------|
+| `is_snipe=True` | 95% fleet only fires on enemy-owned planets, not neutrals |
+| `sent_targets` set | Prevents double-fleet on same target per turn |
+| Predictive defense | Angle-based tracking of enemy fleets in flight |
+| Cross-quadrant reinforcement | Ignores quadrant lines entirely for defense |
+| Per-planet Phase 3 intercept | Each ship computes its own angle independently |
+| Proportional peacetime buff | Based on ship gap ratio, not hardcoded threshold |
+| End-game cutoff at turn 950 | Prevents ships from being wasted off the board |
