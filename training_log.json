@@ -1,0 +1,140 @@
+[
+  {
+    "round": 1,
+    "win_rate_1v1": 0.52,
+    "elapsed_s": 746.8,
+    "match_results": [
+      {
+        "type": "1v1",
+        "enemy": "main_1",
+        "wins": 0,
+        "losses": 5,
+        "draws": 0,
+        "win_rate": 0.0
+      },
+      {
+        "type": "1v1",
+        "enemy": "main_2",
+        "wins": 3,
+        "losses": 2,
+        "draws": 0,
+        "win_rate": 0.6
+      },
+      {
+        "type": "1v1",
+        "enemy": "main_3",
+        "wins": 4,
+        "losses": 1,
+        "draws": 0,
+        "win_rate": 0.8
+      },
+      {
+        "type": "1v1",
+        "enemy": "main_4",
+        "wins": 2,
+        "losses": 3,
+        "draws": 0,
+        "win_rate": 0.4
+      },
+      {
+        "type": "1v1",
+        "enemy": "main_5",
+        "wins": 4,
+        "losses": 1,
+        "draws": 0,
+        "win_rate": 0.8
+      },
+      {
+        "type": "1v1_random",
+        "enemy": "main_1",
+        "outcome": "LOSS",
+        "reward": -1.0
+      },
+      {
+        "type": "ffa",
+        "agents": [
+          "main",
+          "main_1",
+          "main_2",
+          "main_3"
+        ],
+        "outcome": "P2_WINS",
+        "rewards": [
+          -1.0,
+          -1.0,
+          1.0,
+          -1.0
+        ]
+      }
+    ]
+  },
+  {
+    "round": 2,
+    "win_rate_1v1": 0.48,
+    "elapsed_s": 538.5,
+    "match_results": [
+      {
+        "type": "1v1",
+        "enemy": "main_1",
+        "wins": 1,
+        "losses": 4,
+        "draws": 0,
+        "win_rate": 0.2
+      },
+      {
+        "type": "1v1",
+        "enemy": "main_2",
+        "wins": 1,
+        "losses": 4,
+        "draws": 0,
+        "win_rate": 0.2
+      },
+      {
+        "type": "1v1",
+        "enemy": "main_3",
+        "wins": 4,
+        "losses": 1,
+        "draws": 0,
+        "win_rate": 0.8
+      },
+      {
+        "type": "1v1",
+        "enemy": "main_4",
+        "wins": 2,
+        "losses": 3,
+        "draws": 0,
+        "win_rate": 0.4
+      },
+      {
+        "type": "1v1",
+        "enemy": "main_5",
+        "wins": 4,
+        "losses": 1,
+        "draws": 0,
+        "win_rate": 0.8
+      },
+      {
+        "type": "1v1_random",
+        "enemy": "main_4",
+        "outcome": "LOSS",
+        "reward": -1.0
+      },
+      {
+        "type": "ffa",
+        "agents": [
+          "main",
+          "main_1",
+          "main_2",
+          "main_3"
+        ],
+        "outcome": "P1_WINS",
+        "rewards": [
+          -1.0,
+          1.0,
+          -1.0,
+          -1.0
+        ]
+      }
+    ]
+  }
+]

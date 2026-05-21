@@ -1,0 +1,133 @@
+[
+  {
+    "match_type": "2p",
+    "agents": [
+      "main",
+      "main_1"
+    ],
+    "seed": 42,
+    "rewards": [
+      1.0,
+      -1.0
+    ],
+    "outcome": "WIN",
+    "winner": "main",
+    "steps": 133,
+    "elapsed_s": 9.8,
+    "html": "c:\\projects\\OrbitsWar\\simulation\\1v1_vs_main_1.html",
+    "match_label": "1v1_vs_main_1"
+  },
+  {
+    "match_type": "2p",
+    "agents": [
+      "main",
+      "main_2"
+    ],
+    "seed": 43,
+    "rewards": [
+      1.0,
+      -1.0
+    ],
+    "outcome": "WIN",
+    "winner": "main",
+    "steps": 134,
+    "elapsed_s": 10.4,
+    "html": "c:\\projects\\OrbitsWar\\simulation\\1v1_vs_main_2.html",
+    "match_label": "1v1_vs_main_2"
+  },
+  {
+    "match_type": "2p",
+    "agents": [
+      "main",
+      "main_3"
+    ],
+    "seed": 44,
+    "rewards": [
+      1.0,
+      -1.0
+    ],
+    "outcome": "WIN",
+    "winner": "main",
+    "steps": 199,
+    "elapsed_s": 9.7,
+    "html": "c:\\projects\\OrbitsWar\\simulation\\1v1_vs_main_3.html",
+    "match_label": "1v1_vs_main_3"
+  },
+  {
+    "match_type": "2p",
+    "agents": [
+      "main",
+      "main_4"
+    ],
+    "seed": 45,
+    "rewards": [
+      -1.0,
+      1.0
+    ],
+    "outcome": "LOSS",
+    "winner": "main_4",
+    "steps": 151,
+    "elapsed_s": 23.2,
+    "html": "c:\\projects\\OrbitsWar\\simulation\\1v1_vs_main_4.html",
+    "match_label": "1v1_vs_main_4"
+  },
+  {
+    "match_type": "2p",
+    "agents": [
+      "main",
+      "main_5"
+    ],
+    "seed": 46,
+    "rewards": [
+      -1.0,
+      1.0
+    ],
+    "outcome": "LOSS",
+    "winner": "main_5",
+    "steps": 197,
+    "elapsed_s": 16.1,
+    "html": "c:\\projects\\OrbitsWar\\simulation\\1v1_vs_main_5.html",
+    "match_label": "1v1_vs_main_5"
+  },
+  {
+    "match_type": "2p",
+    "agents": [
+      "main",
+      "main_1(random)"
+    ],
+    "seed": 141,
+    "rewards": [
+      -1.0,
+      1.0
+    ],
+    "outcome": "LOSS",
+    "winner": "main_1(random)",
+    "steps": 149,
+    "elapsed_s": 12.7,
+    "html": null,
+    "match_label": "1v1_random_enemy",
+    "randomly_chosen_enemy": "main_1"
+  },
+  {
+    "match_type": "4p",
+    "agents": [
+      "main",
+      "main_1",
+      "main_2",
+      "main_3"
+    ],
+    "seed": 242,
+    "rewards": [
+      -1.0,
+      1.0,
+      -1.0,
+      -1.0
+    ],
+    "outcome": "P1_WINS",
+    "winner": "main_1",
+    "steps": 244,
+    "elapsed_s": 102.0,
+    "html": null,
+    "match_label": "ffa_4player"
+  }
+]
