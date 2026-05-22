@@ -2,3 +2,5 @@
 .claude
 agents.md
 training_data
+__pycache__
+*.pyc
