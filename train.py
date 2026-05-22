@@ -8,13 +8,13 @@
 #   - Self-play with past versions
 #   - FFA and 1v1 match types
 #   - Automatic opponent strength evaluation
-#   - Enhanced feature extraction matching main_v4.py
+#   - Enhanced feature extraction matching main.py
 #
 # Usage:
 #   python enhanced_train.py
 #
 # After training:
-#   zip main_v4.py value_fn.py -> submit to Kaggle
+#   zip main.py value_fn.py -> submit to Kaggle
 # ===================================================================
 
 import os, sys, glob, json, math, time, random, importlib.util, shutil
@@ -27,7 +27,7 @@ if hasattr(sys.stdout,'reconfigure'):
 
 # ── Paths ──────────────────────────────────────────────────────────
 ROOT      = os.path.dirname(os.path.abspath(__file__))
-MAIN_PY   = os.path.join(ROOT, "main_v4.py")
+MAIN_PY   = os.path.join(ROOT, "main.py")
 ENEMY_DIR = os.path.join(ROOT, "enemy agents")
 SIM_DIR   = os.path.join(ROOT, "simulation")
 DATA_DIR  = os.path.join(ROOT, "training_data")
@@ -64,7 +64,7 @@ def load_agent(path, force=False):
     if d not in sys.path:
         sys.path.insert(0, d)
     if force:
-        for k in [name, "value_fn", "main", "main_v4"]:
+        for k in [name, "value_fn", "main", "main"]:
             if k in sys.modules:
                 del sys.modules[k]
     spec = importlib.util.spec_from_file_location(name, os.path.abspath(path))
@@ -74,7 +74,7 @@ def load_agent(path, force=False):
     spec.loader.exec_module(mod)
     return mod.agent, name
 
-# ── Feature extraction (matches main_v4.py exactly) ───────────────
+# ── Feature extraction (matches main.py exactly) ───────────────
 def extract_features(state, player, turn, n_hint=2):
     ms=mp=mpr=mc=ts=tpr=0.0
     ed = {}
@@ -271,27 +271,8 @@ def run_round(my_fn, my_name, enemies, round_num, curriculum_phase):
                                "wins":w,"losses":l,"draws":d,
                                "win_rate": w/max(1,w+l+d)})
 
-    # FFA 4-player with mixed opponents
-    print(f"\n  [FFA] {my_name} vs mixed opponents")
-    ffa_opponents = random.sample(selected, min(3, len(selected)))
-    while len(ffa_opponents) < 3:
-        ffa_opponents.append(random.choice(selected))
-    ffa = [(my_name, my_fn)] + [(n, f) for n, f, _ in ffa_opponents[:3]]
-    seed = SEED_BASE + round_num * 10000 + 88888
-    recs, rewards, steps, outcome = play_game(
-        [fn for _,fn in ffa], [nm for nm,_ in ffa],
-        seed=seed, html_path=None)
-    if max(abs(r) for r in rewards) > 0.01:
-        for pr in recs:
-            all_records.extend(pr)
-    print(f"    Result: {outcome}  ({steps} steps)")
-    print("    Scores: " + ", ".join(
-        f"{nm}={r:+.1f}" for (nm,_),r in zip(ffa,rewards)))
-    match_results.append({"type":"ffa","agents":[nm for nm,_ in ffa],
-                           "outcome":outcome,"rewards":rewards})
-
     # Self-play: main vs previous snapshot (if exists)
-    snapshot_files = sorted(glob.glob(os.path.join(SNAPSHOT_DIR, "main_v4_round_*.py")))
+    snapshot_files = sorted(glob.glob(os.path.join(SNAPSHOT_DIR, "main_round_*.py")))
     if snapshot_files and round_num > 3:
         print(f"\n  [Self-play] vs round {len(snapshot_files)} snapshot")
         try:
@@ -332,10 +313,10 @@ def load_all_records():
 
 # ── Snapshot management ───────────────────────────────────────────
 def save_snapshot(round_num):
-    """Save current main_v4.py as a snapshot for future self-play."""
+    """Save current main.py as a snapshot for future self-play."""
     if not os.path.exists(MAIN_PY):
         return
-    dst = os.path.join(SNAPSHOT_DIR, f"main_v4_round_{round_num:04d}.py")
+    dst = os.path.join(SNAPSHOT_DIR, f"main_round_{round_num:04d}.py")
     shutil.copy(MAIN_PY, dst)
     print(f"  Snapshot saved: {dst}")
 
@@ -444,10 +425,6 @@ def print_round_summary(match_results, round_num):
             wr = r["wins"] / max(1,g) * 100
             print(f"  {'1v1':<14} {r['enemy']:<22} "
                   f"{r['wins']:>3} {r['losses']:>3} {r['draws']:>3} {wr:>5.0f}%")
-        elif r["type"] == "ffa":
-            ags = ", ".join(r["agents"][:4])
-            print(f"  {'FFA':<14} {ags[:38]}")
-            print(f"               {r['outcome']}")
         elif r["type"] == "self_play":
             print(f"  {'Self-play':<14} {r['enemy']:<22}  {r['outcome']}")
 
@@ -500,7 +477,7 @@ def main():
         # Reload main.py every round to pick up new value_fn.py
         my_fn, my_name = load_agent(MAIN_PY, force=True)
         vf_ok = os.path.exists(VALUEFN)
-        print(f"  main_v4.py loaded  (value_fn.py: {'YES' if vf_ok else 'NO -- pure heuristic'})")
+        print(f"  main.py loaded  (value_fn.py: {'YES' if vf_ok else 'NO -- pure heuristic'})")
 
         # Load all enemies
         enemies = []
@@ -567,7 +544,9 @@ def main():
 
         # Train value function from all accumulated data
         print(f"\n  Training value function...")
-        all_records = load_all_records()[-15000:]  # Use more data
+        all_records = load_all_records()
+        if len(all_records) > 15000:
+            all_records = random.sample(all_records, 15000)
         print(f"  Total samples: {len(all_records)}")
         train_and_export(all_records)
 
@@ -596,7 +575,7 @@ def main():
     print(f"  Training data : {DATA_DIR}/")
     print(f"  Training log  : {RESULTS_LOG}")
     print(f"\n  To submit:")
-    print(f"    zip submission.zip main_v4.py value_fn.py")
+    print(f"    zip submission.zip main.py value_fn.py")
     print(f"{'='*65}")
 
 if __name__ == "__main__":
