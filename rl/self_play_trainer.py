@@ -51,14 +51,14 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from buffer import RolloutBuffer
 
-MODEL_PATH      = ROOT / "model.pt"
-BEST_MODEL_PATH = ROOT / "model_best.pt"
+MODEL_PATH      = ROOT / "last.pt"
+BEST_MODEL_PATH = ROOT / "best.pt"
 ENEMY_DIR       = PROJECT_ROOT / "enemy agents"
 MAIN_PY         = PROJECT_ROOT / "main.py"
 
 # ── Hyper-parameters ─────────────────────────────────────────────────────────
 GAMES_PER_ROUND = 8
-N_ROUNDS        = 10
+N_ROUNDS        = 100000  # Continuous loop
 LR              = 3e-4
 GAMMA           = 0.99
 GAE_LAMBDA      = 0.95
@@ -297,6 +297,7 @@ def ppo_update(model, optimizer, buf: RolloutBuffer):
 
     idx_list   = list(range(len(X)))
     total_loss = 0.0
+    total_entropy = 0.0
     n_updates  = 0
 
     model.train()
@@ -326,9 +327,10 @@ def ppo_update(model, optimizer, buf: RolloutBuffer):
             optimizer.step()
 
             total_loss += loss.item()
+            total_entropy += entropy.item()
             n_updates  += 1
 
-    return total_loss / max(1, n_updates)
+    return total_loss / max(1, n_updates), total_entropy / max(1, n_updates)
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -336,16 +338,35 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
     from net import OrbitsNet
 
     model = OrbitsNet()
+    def load_ckpt(path, model):
+        ckpt = torch.load(path, weights_only=False)
+        if isinstance(ckpt, dict) and "state_dict" in ckpt:
+            model.load_state_dict(ckpt["state_dict"])
+            return ckpt.get("best_wr", 0.0), ckpt.get("epoch", 0)
+        else:
+            model.load_state_dict(ckpt)
+            return 0.0, 0
+
+    best_wr = 0.0
+    start_rnd = 1
+
     if MODEL_PATH.exists():
         try:
-            model.load_state_dict(torch.load(MODEL_PATH, weights_only=True))
-            print(f"Loaded model from {MODEL_PATH}")
+            best_wr, start_rnd = load_ckpt(MODEL_PATH, model)
+            print(f"Loaded model from {MODEL_PATH} (Epoch {start_rnd}, Best WR: {best_wr:.1%})")
         except Exception as e:
             print(f"Architecture mismatch ({e}) — starting from random weights.")
-            print("Tip: run replay_trainer.py first to pretrain the value head.\n")
     else:
-        print("No model.pt found — starting from random weights.")
-        print("Tip: run replay_trainer.py first for a better starting point.\n")
+        # Fallback to model.pt if pretraining just finished
+        legacy_path = ROOT / "model.pt"
+        if legacy_path.exists():
+            try:
+                load_ckpt(legacy_path, model)
+                print(f"Loaded pretrained model from {legacy_path}")
+            except Exception as e:
+                pass
+        else:
+            print("No last.pt or model.pt found — starting from random weights.")
 
     optimizer = optim.Adam(model.parameters(), lr=LR)
 
@@ -367,12 +388,12 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
     print(f"Intents: {', '.join(f'{i}={n}' for i, n in enumerate(INTENT_NAMES))}")
     print("=" * 60)
 
-    best_wr    = 0.0
     no_improve = 0
 
-    for rnd in range(1, n_rounds + 1):
+    for rnd in range(start_rnd, n_rounds + 1):
         wins = losses = draws = 0
         round_loss = 0.0
+        round_entropy = 0.0
         intent_counts = [0] * len(INTENT_NAMES)
 
         for g in range(games_per_round):
@@ -389,8 +410,9 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
             for a in buf.actions:
                 intent_counts[a] += 1
 
-            loss = ppo_update(model, optimizer, buf)
+            loss, entropy = ppo_update(model, optimizer, buf)
             round_loss += loss
+            round_entropy += entropy
             buf.clear()
 
             if   outcome == "WIN":  wins   += 1
@@ -407,6 +429,8 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
         wr       = wins / games_per_round
         avg_loss = round_loss / games_per_round
 
+        avg_entropy = round_entropy / games_per_round
+
         # Intent distribution summary
         total_steps = sum(intent_counts)
         if total_steps > 0:
@@ -417,27 +441,41 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
         else:
             intent_pct = "no steps"
 
-        torch.save(model.state_dict(), MODEL_PATH)
+        checkpoint_data = {
+            "epoch": rnd,
+            "best_wr": max(wr, best_wr),
+            "loss": avg_loss,
+            "entropy": avg_entropy,
+            "state_dict": model.state_dict()
+        }
+        
+        torch.save(checkpoint_data, MODEL_PATH)
 
         if wr > best_wr:
             best_wr    = wr
             no_improve = 0
-            torch.save(model.state_dict(), BEST_MODEL_PATH)
-            tag = f"  *** best so far ({wr:.1%}) → model_best.pt"
+            torch.save(checkpoint_data, BEST_MODEL_PATH)
+            tag = f"  *** best so far ({wr:.1%}) → best.pt"
         else:
             no_improve += 1
             tag = f"  (no improvement, best={best_wr:.1%}, streak={no_improve})"
             if BEST_MODEL_PATH.exists():
-                model.load_state_dict(torch.load(BEST_MODEL_PATH, weights_only=True))
+                load_ckpt(BEST_MODEL_PATH, model)
 
-        print(f"\n  -> WR={wr:.1%}  avg_ppo_loss={avg_loss:.4f}{tag}")
+        print(f"\n  -> WR={wr:.1%}  avg_ppo_loss={avg_loss:.4f}  avg_ent={avg_entropy:.4f}{tag}")
         print(f"     intents: {intent_pct}")
 
     print(f"\nPPO self-play complete.  Best WR={best_wr:.1%}")
     if BEST_MODEL_PATH.exists():
-        model.load_state_dict(torch.load(BEST_MODEL_PATH, weights_only=True))
-        torch.save(model.state_dict(), MODEL_PATH)
-        print(f"  Final model.pt ← best checkpoint ({best_wr:.1%})")
+        load_ckpt(BEST_MODEL_PATH, model)
+        torch.save({
+            "epoch": rnd,
+            "best_wr": best_wr,
+            "loss": avg_loss,
+            "entropy": avg_entropy,
+            "state_dict": model.state_dict()
+        }, MODEL_PATH)
+        print(f"  Final last.pt ← best checkpoint ({best_wr:.1%})")
     return model
 
 

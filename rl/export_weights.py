@@ -33,8 +33,8 @@ ROOT         = Path(__file__).parent
 PROJECT_ROOT = ROOT.parent
 sys.path.insert(0, str(ROOT))
 
-MODEL_PATH      = ROOT / "model.pt"
-BEST_MODEL_PATH = ROOT / "model_best.pt"
+MODEL_PATH      = ROOT / "last.pt"
+BEST_MODEL_PATH = ROOT / "best.pt"
 OUTPUT_PATH     = PROJECT_ROOT / "rl_value_fn.py"
 
 
@@ -59,7 +59,15 @@ def export(model_path=None, output_path=OUTPUT_PATH):
         return False
 
     model = OrbitsNet()
-    model.load_state_dict(torch.load(model_path, weights_only=True))
+    ckpt = torch.load(model_path, weights_only=False)
+    if isinstance(ckpt, dict) and "state_dict" in ckpt:
+        model.load_state_dict(ckpt["state_dict"])
+        epoch = ckpt.get("epoch", "?")
+        best_wr = ckpt.get("best_wr", 0.0)
+        print(f"Exporting checkpoint from Epoch {epoch} (WR: {best_wr:.1%})")
+    else:
+        model.load_state_dict(ckpt)
+    
     model.eval()
 
     p = {n: v.detach().numpy() for n, v in model.named_parameters()}
