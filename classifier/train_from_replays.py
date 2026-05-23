@@ -25,7 +25,7 @@ N_ESTIMATORS        = 600
 MAX_DEPTH           = 5
 LEARNING_RATE       = 0.003
 AUC_MIN             = 0.58
-MAX_RECORDS_PER_CAT = 15000
+MAX_RECORDS_PER_CAT = 9999999
 
 # TD trajectory parsing (separate from BCE snapshot cache)
 TD_SNAPSHOT_EVERY = 1   # every turn — dense transitions for offline TD
@@ -275,7 +275,8 @@ def train_and_export(all_records, val_records=None):
         clf = GradientBoostingClassifier(
             n_estimators=ne, max_depth=d,
             learning_rate=LEARNING_RATE, subsample=0.8,
-            min_samples_leaf=30, random_state=42)
+            min_samples_leaf=30, random_state=42,
+            verbose=1)
         clf.fit(Xt, yt)
         return clf, roc_auc_score(yv, clf.predict_proba(Xv)[:,1])
 
@@ -291,7 +292,7 @@ def train_and_export(all_records, val_records=None):
     any_good = False
 
     for name, mask, ne, d in specs:
-        print(f"  {name:<8} ...", end=" ", flush=True)
+        print(f"\n  {name:<8} ...")
         clf, auc = _tr(mask, ne, d)
         if clf is None:
             print(f"    Skipped (not enough variance in data)")
@@ -448,6 +449,182 @@ def get_td_trajectories(replay_files=None):
     return all_trajectories
 
 
+def _compute_td_values(trajectories, gamma=0.99, reward_scale=0.1):
+    """
+    Compute discounted TD returns V(s_t) for every step of every trajectory.
+
+    Algorithm (backward pass through each trajectory):
+        V(s_T)   = won                               (terminal ground truth)
+        V(s_t)   = shaped_r(s_t, s_{t+1}) + gamma * V(s_{t+1})
+
+    Shaped reward uses feature indices already stored in each feats vector:
+        index 2 = my_planet_share
+        index 4 = my_ship_share
+        index 6 = my_prod_share
+
+    Returns list of (feats, V) pairs where V is in [0, 1].
+    """
+    pairs = []
+    for td in trajectories:
+        traj = td["traj"]   # list of 30-dim feature vectors
+        won  = td["won"]    # 0.0 or 1.0
+        T    = len(traj)
+
+        # Per-step shaped rewards (index 0 is undefined, set to 0)
+        shaped = [0.0] * T
+        for t in range(1, T):
+            d_ships   = traj[t][4] - traj[t-1][4]
+            d_prod    = traj[t][6] - traj[t-1][6]
+            d_planets = traj[t][2] - traj[t-1][2]
+            shaped[t] = reward_scale * (0.4*d_ships + 0.4*d_prod + 0.2*d_planets)
+
+        # Backward pass: V(s_T) = won, V(s_t) = r_{t+1} + gamma*V(s_{t+1})
+        V = [0.0] * T
+        V[T - 1] = won
+        for t in range(T - 2, -1, -1):
+            V[t] = shaped[t + 1] + gamma * V[t + 1]
+
+        for t in range(T):
+            pairs.append((traj[t], V[t]))
+
+    return pairs
+
+
+def train_and_export_regressor(gamma=0.99, reward_scale=0.1,
+                                n_estimators=600, max_depth=5,
+                                learning_rate=0.003):
+    """
+    Train a GradientBoostingRegressor on TD regression targets and export
+    to value_fn.py in the same format as the classifier.
+
+    Why regression improves small-signal learning
+    ---------------------------------------------
+    Binary labels collapse every winning snapshot to 1 and every losing one
+    to 0.  A state where you're barely ahead at turn 200 and a state where
+    you're dominating at turn 480 both get label 1.  The regressor instead
+    gets V(s_t) = discounted return from that state, so:
+        dominating win at t=480  -> V ~ 0.97
+        barely ahead at t=200    -> V ~ 0.60
+        neutral at t=100         -> V ~ 0.50
+        barely losing at t=200   -> V ~ 0.40
+        dominating loss at t=480 -> V ~ 0.03
+
+    Targets are logit-transformed before training so _sig() in main.py
+    correctly converts them back to probabilities at inference — no changes
+    to main.py required.
+    """
+    try:
+        import numpy as np
+        from sklearn.ensemble import GradientBoostingRegressor
+        from sklearn.metrics import mean_squared_error
+    except ImportError:
+        print("pip install scikit-learn numpy"); return False
+
+    print("Loading TD trajectories (train split)...")
+    train_files, val_files = split_replay_files()
+    train_trajs = get_td_trajectories(replay_files=train_files)
+    print("Loading TD trajectories (val split)...")
+    val_trajs   = get_td_trajectories(replay_files=val_files)
+
+    if not train_trajs:
+        print("No trajectories found."); return False
+
+    print("Computing TD regression targets...")
+    train_pairs = _compute_td_values(train_trajs, gamma=gamma, reward_scale=reward_scale)
+    val_pairs   = _compute_td_values(val_trajs,   gamma=gamma, reward_scale=reward_scale)
+    random.shuffle(train_pairs)
+
+    X_train = np.array([p[0] for p in train_pairs], dtype=np.float32)
+    y_train = np.array([p[1] for p in train_pairs], dtype=np.float32)
+    X_val   = np.array([p[0] for p in val_pairs],   dtype=np.float32)
+    y_val   = np.array([p[1] for p in val_pairs],   dtype=np.float32)
+
+    # Logit-transform targets so _sig() in main.py works correctly at inference
+    eps = 1e-6
+    logit_train = np.log(np.clip(y_train, eps, 1-eps) / (1 - np.clip(y_train, eps, 1-eps)))
+    logit_val   = np.log(np.clip(y_val,   eps, 1-eps) / (1 - np.clip(y_val,   eps, 1-eps)))
+
+    print(f"\nTrain: {len(X_train):,} samples  |  Val: {len(X_val):,} samples")
+    print(f"V target range: [{y_train.min():.3f}, {y_train.max():.3f}]  "
+          f"mean={y_train.mean():.3f}  std={y_train.std():.3f}")
+
+    # Turn index: feature[0] = turn / 500
+    train_turns = X_train[:, 0] * 500
+    val_turns   = X_val[:,   0] * 500
+
+    specs = [
+        ("GLOBAL", np.ones(len(X_train), bool),  np.ones(len(X_val), bool),  n_estimators, max_depth),
+        ("EARLY",  train_turns <= 100,             val_turns <= 100,           300,          5),
+        ("LATE",   train_turns >= 300,             val_turns >= 300,           300,          5),
+    ]
+
+    lines    = ["# AUTO-GENERATED by train_from_replays.py (TD regressor) -- do not edit", ""]
+    exported = []
+
+    for name, tr_mask, va_mask, ne, d in specs:
+        n_tr = tr_mask.sum()
+        n_va = va_mask.sum()
+        if n_tr < 200:
+            print(f"  {name:<8} Skipped (only {n_tr} samples)")
+            continue
+
+        print(f"\n  {name:<8} {n_tr:>7,} train  {n_va:>7,} val  ...")
+
+        reg = GradientBoostingRegressor(
+            n_estimators=ne, max_depth=d,
+            learning_rate=learning_rate, subsample=0.8,
+            min_samples_leaf=30, random_state=42,
+            loss="squared_error",
+            verbose=1,
+        )
+        reg.fit(X_train[tr_mask], logit_train[tr_mask])
+
+        # Validation: convert logit predictions back to probability, measure MSE vs V
+        if n_va >= 10:
+            pred_logit = reg.predict(X_val[va_mask])
+            pred_prob  = 1.0 / (1.0 + np.exp(-pred_logit))
+            val_mse    = mean_squared_error(y_val[va_mask], pred_prob)
+            # Also compare to naive baseline (predict mean V for everyone)
+            baseline   = mean_squared_error(y_val[va_mask],
+                                            np.full(n_va, y_train[tr_mask].mean()))
+            print(f"val_MSE={val_mse:.4f}  baseline={baseline:.4f}  "
+                  f"improve={100*(1-val_mse/baseline):.1f}%")
+        else:
+            print("(no val samples)")
+
+        # Export in same format as classifier — INIT is mean(logit_train) for this subset,
+        # which is what DummyRegressor(strategy='mean') predicts
+        init_val = float(logit_train[tr_mask].mean())
+
+        lines.append(f"{name}_INIT={init_val:.8f}")
+        lines.append(f"{name}_N_TREES={len(reg.estimators_)}")
+        lines.append(f"{name}_TREES=[")
+        for ta in reg.estimators_:
+            t  = ta[0].tree_
+            fi = [int(v)                              for v in t.feature]
+            th = [round(float(v), 6)                  for v in t.threshold]
+            va_vals = [round(float(t.value[i,0,0]),8) for i in range(t.node_count)]
+            le = [int(v)                              for v in t.children_left]
+            ri = [int(v)                              for v in t.children_right]
+            lines.append(f"    ({fi},{th},{va_vals},{le},{ri}),")
+        lines.append("]")
+        lines.append("")
+        exported.append(name)
+
+    if not exported:
+        print("No models exported."); return False
+
+    lines.append(f"VALUE_FN_MODELS={exported!r}")
+    lines.append("VALUE_FN_LOADED=True")
+    lines.append("")
+
+    with open(VALUEFN, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    sz = os.path.getsize(VALUEFN) / 1024
+    print(f"\nExported (TD regressor) -> {VALUEFN}  ({sz:.1f} KB)")
+    return True
+
+
 def main():
     print("=================================================================")
     print("  Orbit Wars -- Train from Kaggle Replays")
@@ -486,4 +663,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    p = argparse.ArgumentParser(description="Train Orbit Wars value function from replays")
+    p.add_argument("--regressor", action="store_true",
+                   help="Train TD GBM regressor (value_fn.py for Submission 2)")
+    p.add_argument("--gamma",        type=float, default=0.99,  help="TD discount (default 0.99)")
+    p.add_argument("--reward-scale", type=float, default=0.1,   help="Shaped reward scale (default 0.1)")
+    args = p.parse_args()
+
+    if args.regressor:
+        train_and_export_regressor(gamma=args.gamma, reward_scale=args.reward_scale)
+    else:
+        main()
