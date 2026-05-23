@@ -28,10 +28,10 @@ LATE_TREES  =[];   LATE_INIT=0.0;   LATE_N_TREES=0
 VALUE_FN_LOADED=False
 
 try:
-    from value_fn import GLOBAL_TREES,GLOBAL_INIT,GLOBAL_N_TREES,VALUE_FN_LOADED
-    try: from value_fn import EARLY_TREES,EARLY_INIT,EARLY_N_TREES
+    from old import GLOBAL_TREES,GLOBAL_INIT,GLOBAL_N_TREES,VALUE_FN_LOADED
+    try: from old import EARLY_TREES,EARLY_INIT,EARLY_N_TREES
     except ImportError: pass
-    try: from value_fn import LATE_TREES,LATE_INIT,LATE_N_TREES
+    try: from old import LATE_TREES,LATE_INIT,LATE_N_TREES
     except ImportError: pass
 except ImportError:
     pass
@@ -637,29 +637,61 @@ def indirect_features(planet, planets, player):
 # RL FEATURE EXTRACTION (from main(2).py)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _extract_features(planets_raw, player, turn, n_hint=2):
+def _extract_features(planets_raw, player, turn, n_hint=2, fleets_raw=None):
     ms=mp=mpr=mc=ts=tpr=0.0; ed={}
+    msl=[]; mprl=[]; mpos=[]; epos=[]
     for p in planets_raw:
         sh=max(0.0,float(p[5])); ts+=sh
         ow=p[1]
         if ow==-1: continue
         pr=float(p[6]); tpr+=pr
         cn=max(0.0,60.0-math.hypot(float(p[2])-50.0,float(p[3])-50.0))
-        if ow==player: ms+=sh; mp+=1; mpr+=pr; mc+=cn
+        if ow==player:
+            ms+=sh; mp+=1; mpr+=pr; mc+=cn
+            msl.append(sh); mprl.append(pr)
+            mpos.append((float(p[2]),float(p[3])))
         else:
-            e=ed.setdefault(ow,{'s':0.,'p':0,'pr':0.,'c':0.})
+            e=ed.setdefault(ow,{'s':0.,'p':0,'pr':0.,'c':0.,'sl':[],'prl':[]})
             e['s']+=sh; e['p']+=1; e['pr']+=pr; e['c']+=cn
-    bes=bep=bepr=bec=0.0
+            e['sl'].append(sh); e['prl'].append(pr)
+            epos.append((float(p[2]),float(p[3])))
+    bes=bep=bepr=bec=0.0; best_ow=None
     if ed:
-        be=max(ed.values(),key=lambda e:e['s']+100*e['p'])
+        best_ow,be=max(ed.items(),key=lambda kv:kv[1]['s']+100*kv[1]['p'])
         bes=be['s']; bep=float(be['p']); bepr=be['pr']
         bec=be['c']/max(1,be['p'])
     tp=max(1,len(planets_raw)); sf=lambda a,b:a/b if b>1e-9 else 0.0
     np2=max(2,1+len(ed),n_hint)
+    my_max_sh=max(msl) if msl else 0.0
+    be_sl=ed[best_ow]['sl'] if best_ow else []
+    enemy_max_sh=max(be_sl) if be_sl else 0.0
+    neutral_cnt=sum(1 for p in planets_raw if p[1]==-1)
+    my_top3_pr=sum(sorted(mprl,reverse=True)[:3]) if mprl else 0.0
+    be_prl=ed[best_ow]['prl'] if best_ow else []
+    enemy_top3_pr=sum(sorted(be_prl,reverse=True)[:3]) if be_prl else 0.0
+    min_edist=1.0
+    if mpos and epos:
+        min_edist=min(math.hypot(mx-ex,my-ey)
+                      for mx,my in mpos for ex,ey in epos)/100.0
+    mfs=efs=0.0; mfc=efc=0
+    for f in (fleets_raw or []):
+        fow=f[1]; fsh=float(f[6])
+        if fow==player: mfs+=fsh; mfc+=1
+        elif fow!=-1:   efs+=fsh; efc+=1
+    ta=ts+mfs+efs+1.0
     return [turn/500.0,np2/4.0,sf(mp,tp),sf(bep,tp),sf(ms,ts),sf(bes,ts),
             sf(mpr,tpr),sf(bepr,tpr),(mc/max(1,mp))/60.0,bec/60.0,
             sf(ms-bes,ts+1),sf(mp-bep,tp),sf(mpr-bepr,tpr+1),
-            1.0 if np2==2 else 0.0,1.0 if np2==4 else 0.0,sf(ms,bes+1)]
+            1.0 if np2==2 else 0.0,1.0 if np2==4 else 0.0,sf(ms,bes+1),
+            my_max_sh/max(1.0,ts),enemy_max_sh/max(1.0,ts),
+            neutral_cnt/tp,
+            sf(my_top3_pr,tpr),sf(enemy_top3_pr,tpr),
+            min(1.0,min_edist),
+            sf(mfs,ta),sf(efs,ta),
+            min(1.0,mfc/8.0),min(1.0,efc/8.0),
+            sf(mfs,ms+1.0),sf(efs,bes+1.0),
+            sf(mpr,mp*5.0+1.0),
+            min(1.0,(turn/500.0)*sf(ms,ts+1.0))]
 # ═══════════════════════════════════════════════════════════════════════════
 # WORLD MODEL
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1131,11 +1163,25 @@ def build_policy_state(world, deadline=None):
     }
 
 def build_modes(world):
-    domination = (world.my_total - world.enemy_total) / max(1, world.my_total + world.enemy_total)
+    # In FFA compare against the strongest single enemy, not the sum of all enemies.
+    # Using the sum means you're permanently "behind" even when leading (25% vs 75% at equal strength).
+    if world.is_four_player:
+        domination = (world.my_total - world.max_enemy_strength) / max(1, world.my_total + world.max_enemy_strength)
+        max_enemy_prod = max((world.owner_production.get(o, 0) for o in world.owner_strength
+                              if o != world.player and o != -1), default=0)
+        is_finishing = domination > FINISHING_DOMINATION and world.my_prod > max_enemy_prod * FINISHING_PROD_RATIO and world.step > 100
+        leader_id = max(
+            (o for o in world.owner_strength if o != world.player and o != -1),
+            key=lambda o: world.owner_strength[o], default=None
+        )
+    else:
+        domination = (world.my_total - world.enemy_total) / max(1, world.my_total + world.enemy_total)
+        is_finishing = domination > FINISHING_DOMINATION and world.my_prod > world.enemy_prod * FINISHING_PROD_RATIO and world.step > 100
+        leader_id = None
+
     is_behind = domination < BEHIND_DOMINATION
     is_ahead = domination > AHEAD_DOMINATION
     is_dominating = is_ahead or (world.max_enemy_strength > 0 and world.my_total > world.max_enemy_strength * 1.25)
-    is_finishing = domination > FINISHING_DOMINATION and world.my_prod > world.enemy_prod * FINISHING_PROD_RATIO and world.step > 100
 
     attack_margin_mult = 1.0
     if is_ahead:
@@ -1152,6 +1198,7 @@ def build_modes(world):
         "is_dominating": is_dominating,
         "is_finishing": is_finishing,
         "attack_margin_mult": attack_margin_mult,
+        "leader_id": leader_id,
     }
 
 def is_safe_neutral(target, policy):
@@ -1241,6 +1288,11 @@ def target_value(target, arrival_turns, mission, world, modes, policy):
         value *= 1.08
     if modes["is_dominating"] and target.owner == -1 and is_contested_neutral(target, policy):
         value *= 0.92
+
+    # FFA: 20% bonus for attacking the current leader — prevents runaway wins
+    if world.is_four_player and target.owner not in (-1, world.player):
+        if modes.get("leader_id") is not None and target.owner == modes["leader_id"]:
+            value *= 1.20
 
     return value
 
@@ -1828,8 +1880,8 @@ def build_interception_missions(world, policy, planned_commitments, modes):
         target, eta = fleet_target_planet(fleet, world.planets)
         if target is None:
             continue
-        if target.owner != -1:
-            continue  # Only intercept fleets going to neutrals
+        if target.owner == world.player:
+            continue  # Defending own planets is handled by reinforce/rescue missions
         
         # Check if we can beat the enemy fleet to the target
         for src in world.my_planets:
@@ -1897,6 +1949,7 @@ def plan_moves(world, deadline=None):
     policy = build_policy_state(world, deadline=deadline)
     planned_commitments = defaultdict(list)
     source_options_by_target = defaultdict(list)
+    rl_boost_map = {}  # (src_id, target_id) -> cached RL boost for reuse in swarm scoring
     missions = []
     moves = []
     spent_total = defaultdict(int)
@@ -2017,11 +2070,11 @@ def plan_moves(world, deadline=None):
                     raw_p = [[p.id, p.owner, p.x, p.y, p.radius, p.ships, p.production] for p in world.planets]
                     raw_f = [[f.id, f.owner, f.x, f.y, f.angle, f.from_planet_id, f.ships] for f in world.fleets]
                     sim = _sim_move(raw_p, raw_f, world.player, src.id, angle, send_cap)
-                    feats = _extract_features(sim, world.player, world.step)
+                    feats = _extract_features(sim, world.player, world.step, fleets_raw=raw_f)
                     pw = value_score(feats, world.step)
                     if pw is not None:
-                        # Blend heuristic score with RL probability
-                        rl_boost = 0.2 * (pw - 0.5)  # Center around 0.5
+                        rl_boost = 0.35 * (pw - 0.5)
+                        rl_boost_map[(src.id, target.id)] = rl_boost
                         value *= (1.0 + rl_boost)
 
                 score = apply_score_modifiers(value / (send_cap + turns * ATTACK_COST_TURN_WEIGHT + 1.0), target, "capture", world)
@@ -2069,6 +2122,10 @@ def plan_moves(world, deadline=None):
 
                 pair_score = apply_score_modifiers(value / (need + joint_turn * ATTACK_COST_TURN_WEIGHT + 1.0), target, "swarm", world)
                 pair_score *= MULTI_SOURCE_PLAN_PENALTY
+                pair_rl = max(rl_boost_map.get((first.src_id, target_id), 0.0),
+                              rl_boost_map.get((second.src_id, target_id), 0.0))
+                if pair_rl != 0.0:
+                    pair_score *= (1.0 + pair_rl)
                 missions.append(Mission(kind="swarm", score=pair_score, target_id=target_id, turns=joint_turn, options=[first, second]))
 
         if THREE_SOURCE_SWARM_ENABLED and allow_heavy_phase() and target.owner not in (-1, world.player) and int(target.ships) >= THREE_SOURCE_MIN_TARGET_SHIPS and len(top_options) >= 3:
@@ -2099,6 +2156,9 @@ def plan_moves(world, deadline=None):
 
                         trio_score = apply_score_modifiers(value / (need + joint_turn * ATTACK_COST_TURN_WEIGHT + 1.0), target, "swarm", world)
                         trio_score *= THREE_SOURCE_PLAN_PENALTY
+                        trio_rl = max((rl_boost_map.get((o.src_id, target_id), 0.0) for o in trio), default=0.0)
+                        if trio_rl != 0.0:
+                            trio_score *= (1.0 + trio_rl)
                         missions.append(Mission(kind="swarm", score=trio_score, target_id=target_id, turns=joint_turn, options=trio))
 
     if allow_heavy_phase():
@@ -2265,10 +2325,10 @@ def plan_moves(world, deadline=None):
                     raw_p = [[p.id, p.owner, p.x, p.y, p.radius, p.ships, p.production] for p in world.planets]
                     raw_f = [[f.id, f.owner, f.x, f.y, f.angle, f.from_planet_id, f.ships] for f in world.fleets]
                     sim = _sim_move(raw_p, raw_f, world.player, src.id, plan[0], final_send)
-                    feats = _extract_features(sim, world.player, world.step)
+                    feats = _extract_features(sim, world.player, world.step, fleets_raw=raw_f)
                     pw = value_score(feats, world.step)
                     if pw is not None:
-                        rl_boost = 0.2 * (pw - 0.5)
+                        rl_boost = 0.35 * (pw - 0.5)
                         value *= (1.0 + rl_boost)
 
                 score = apply_score_modifiers(value / (final_send + turns * ATTACK_COST_TURN_WEIGHT + 1.0), target, "capture", world)
@@ -2682,7 +2742,6 @@ def _sim_move(planets_raw, raw_fleets, player, src_id, angle, ships, lookahead=2
     ca,sa = math.cos(angle),math.sin(angle)
 
     for f in raw_fleets:
-        if f[1]==player: continue
         fc,fs2,fa2,fsh = f[2],f[3],f[4],f[6]
         spd = 1.0+(MAX_SPEED-1.0)*(math.log(max(1,fsh))/math.log(1000))**1.5
         fca,fsa = math.cos(fa2),math.sin(fa2)

@@ -1,24 +1,17 @@
 # ===================================================================
-# enhanced_train.py
+# ffa_train.py  v5.0
 #
-# Improved training pipeline for Orbit Wars agent.
-# Features:
-#   - Diverse opponent pool (aggressive, defensive, random, self-play)
-#   - Curriculum learning: easy → medium → hard opponents
-#   - Self-play with past versions
-#   - FFA and 1v1 match types
-#   - Automatic opponent strength evaluation
-#   - Enhanced feature extraction matching main.py
-#
-# Usage:
-#   python enhanced_train.py
-#
-# After training:
-#   zip main.py value_fn.py -> submit to Kaggle
+# Training pipeline for Orbit Wars agent -- 1v1v1v1 FFA.
+# Fixes over v4:
+#   - Replay pretraining from 271 Kaggle match replays
+#   - FFA-based curriculum evaluation (not 1v1)
+#   - balance_records() fixes 75/25 FFA label imbalance
+#   - load_recent_records() stops stale round-1 data mixing in
+#   - AUC_MIN lowered to 0.58 so FFA models actually get exported
+#   - Removed snapshot / self-play logic
 # ===================================================================
 
-import os, sys, glob, json, math, time, random, importlib.util, shutil
-from collections import namedtuple, defaultdict
+import os, sys, glob, json, math, time, random, importlib.util
 from pathlib import Path
 
 if hasattr(sys.stdout,'reconfigure'):
@@ -26,35 +19,38 @@ if hasattr(sys.stdout,'reconfigure'):
     except: pass
 
 # ── Paths ──────────────────────────────────────────────────────────
-ROOT      = os.path.dirname(os.path.abspath(__file__))
-MAIN_PY   = os.path.join(ROOT, "main.py")
-ENEMY_DIR = os.path.join(ROOT, "enemy agents")
-SIM_DIR   = os.path.join(ROOT, "simulation")
-DATA_DIR  = os.path.join(ROOT, "training_data")
-VALUEFN   = os.path.join(ROOT, "value_fn.py")
-RESULTS_LOG = os.path.join(ROOT, "training_log.json")
-SNAPSHOT_DIR = os.path.join(ROOT, "snapshots")
+ROOT         = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(ROOT)
+MAIN_PY      = os.path.join(PROJECT_ROOT, "main.py")
+ENEMY_DIR    = os.path.join(PROJECT_ROOT, "enemy agents")
+SIM_DIR      = os.path.join(PROJECT_ROOT, "simulation")
+DATA_DIR     = os.path.join(ROOT, "training_data")
+RECORDS_DIR  = os.path.join(PROJECT_ROOT, "records")
+VALUEFN      = os.path.join(PROJECT_ROOT, "value_fn.py")
+RESULTS_LOG  = os.path.join(ROOT, "training_log_ffa.json")
 
-for _d in (ENEMY_DIR, SIM_DIR, DATA_DIR, SNAPSHOT_DIR):
+for _d in (ENEMY_DIR, SIM_DIR, DATA_DIR):
     os.makedirs(_d, exist_ok=True)
 
 # ── Settings ───────────────────────────────────────────────────────
-MAX_ROUNDS      = 25
-WIN_RATE_TARGET = 0.85
-GAMES_PER_ENEMY = 8
-SNAPSHOT_EVERY  = 5
-MIN_SAMPLES     = 500
-N_ESTIMATORS    = 600
-MAX_DEPTH       = 5
-LEARNING_RATE   = 0.003
-AUC_MIN         = 0.65
-SEED_BASE       = 42
+MAX_ROUNDS          = 25
+WIN_RATE_TARGET     = 0.80
+FFA_GAMES_PER_ROUND = 8
+EVAL_GAMES          = 4      # FFA evaluation games per opponent
+SNAPSHOT_EVERY      = 5      # feature snapshot interval (turns)
+MIN_SAMPLES         = 500
+N_ESTIMATORS        = 600
+MAX_DEPTH           = 5
+LEARNING_RATE       = 0.003
+AUC_MIN             = 0.58   # was 0.65 -- FFA models now get exported
+SEED_BASE           = 42
+RECENT_ROUNDS       = 5      # only train on last N rounds of self-play
+REPLAY_MIX_SIZE     = 5000   # replay records mixed into each training round
 
-# Curriculum learning phases
 CURRICULUM_PHASES = [
-    {"name": "easy", "min_wr": 0.6,   "max_wr": 1.0,   "weight": 2.0},
+    {"name": "easy",   "min_wr": 0.6, "max_wr": 1.0, "weight": 2.0},
     {"name": "medium", "min_wr": 0.3, "max_wr": 0.7, "weight": 1.5},
-    {"name": "hard", "min_wr": 0.0,   "max_wr": 0.4,   "weight": 1.0},
+    {"name": "hard",   "min_wr": 0.0, "max_wr": 0.4, "weight": 1.0},
 ]
 
 # ── Agent loader ──────────────────────────────────────────────────
@@ -64,7 +60,7 @@ def load_agent(path, force=False):
     if d not in sys.path:
         sys.path.insert(0, d)
     if force:
-        for k in [name, "value_fn", "main", "main"]:
+        for k in [name, "value_fn", "main"]:
             if k in sys.modules:
                 del sys.modules[k]
     spec = importlib.util.spec_from_file_location(name, os.path.abspath(path))
@@ -121,32 +117,30 @@ def snap(raw_p, comet_ids=None):
 
 # ── Game runner ───────────────────────────────────────────────────
 def play_game(fns, names, seed=0, html_path=None):
-    """Play one game. Returns (records_per_player, rewards, steps, outcome)."""
     from kaggle_environments import make
     n = len(fns)
     env = make("orbit_wars",
                configuration={"seed": seed, "randomSeed": seed},
                debug=False)
     env.reset(num_agents=n)
-    snaps   = [[] for _ in range(n)]
-    states  = env.step([[]] * n)
-    step    = 0
+    snaps  = [[] for _ in range(n)]
+    states = env.step([[]] * n)
+    step   = 0
 
     while True:
-        st0 = states[0]
+        st0    = states[0]
         status = str(st0.status if hasattr(st0,'status') else st0.get('status','ACTIVE'))
         if status != 'ACTIVE':
             break
         obss = [(s.observation if hasattr(s,'observation') else s.get('observation'))
                 for s in states]
 
-        # Snapshot board every N turns
         if step % SNAPSHOT_EVERY == 0 and obss[0] is not None:
-            rp  = (obss[0].get("planets",[]) if isinstance(obss[0],dict)
-                   else getattr(obss[0],"planets",[]))
-            ci  = set(obss[0].get("comet_planet_ids",[]) if isinstance(obss[0],dict)
-                      else getattr(obss[0],"comet_planet_ids",[]))
-            sd  = snap(rp, ci)
+            rp = (obss[0].get("planets",[]) if isinstance(obss[0],dict)
+                  else getattr(obss[0],"planets",[]))
+            ci = set(obss[0].get("comet_planet_ids",[]) if isinstance(obss[0],dict)
+                     else getattr(obss[0],"comet_planet_ids",[]))
+            sd = snap(rp, ci)
             if sd:
                 for i in range(n):
                     snaps[i].append((step, extract_features(sd, i, step, n)))
@@ -167,18 +161,16 @@ def play_game(fns, names, seed=0, html_path=None):
                "WIN"  if winner == 0 else
                "LOSS" if n == 2 else f"P{winner}_WINS")
 
-    # Label records with outcome
     records = []
     for i in range(n):
         won = 1 if i == winner else 0
         records.append([{'feats':f,'turn':t,'won':won,'player':i}
                          for t,f in snaps[i]])
 
-    # Save HTML replay
     if html_path:
         try:
             html = env.render(mode="html", width=960, height=720)
-            cols = ["#4a90e8","#e87e4a","#4ae87e","#e84a90"]
+            cols  = ["#4a90e8","#e87e4a","#4ae87e","#e84a90"]
             spans = "".join(
                 f"<span style='background:{cols[i]};color:#fff;padding:3px 10px;"
                 f"border-radius:12px;font-size:.9em;margin:2px'>P{i}: {nm}</span>"
@@ -194,105 +186,86 @@ def play_game(fns, names, seed=0, html_path=None):
 
     return records, rewards, step, outcome
 
-# ── Opponent evaluation ───────────────────────────────────────────
-def evaluate_opponent_strength(my_fn, enemy_fn, enemy_name, n_games=5):
-    """Quick evaluation of an opponent's strength. Returns win rate."""
-    wins = 0
+# ── Opponent evaluation — FFA-based ──────────────────────────────
+def evaluate_opponent_ffa_strength(my_fn, my_name, all_enemy_fns,
+                                    target_name, target_fn, n_games=EVAL_GAMES):
+    """Evaluate enemy difficulty using actual FFA games, not 1v1."""
+    others = [(n, f) for n, f in all_enemy_fns if n != target_name]
+    wins   = 0
     for g in range(n_games):
-        seed = SEED_BASE + hash(enemy_name) % 10000 + g
+        n_fill  = min(2, len(others))
+        fillers = random.sample(others, n_fill) if others else []
+        lobby   = [(my_name, my_fn), (target_name, target_fn)] + fillers
+        while len(lobby) < 4:
+            lobby.append((target_name, target_fn))
+        seed = SEED_BASE + hash(target_name) % 10000 + g
         recs, rewards, steps, outcome = play_game(
-            [my_fn, enemy_fn], ["main", enemy_name], seed=seed)
+            [fn for _, fn in lobby], [nm for nm, _ in lobby], seed=seed)
         if outcome == "WIN":
             wins += 1
-        
-        nth = ["1st", "2nd", "3rd", "4th", "5th"][g] if g < 5 else f"{g+1}th"
-        print(f"    {nth} match {enemy_name} {outcome} , {steps} Turns")
-        
+        labels = ["1st","2nd","3rd","4th"]
+        print(f"    {labels[g] if g<4 else f'{g+1}th'} FFA vs {target_name}: {outcome}, {steps} turns")
     wr = wins / n_games
-    print(f"    -> {enemy_name}: {wr:.0%} win rate ({wins}/{n_games})")
+    print(f"    -> {target_name}: {wr:.0%} FFA win rate ({wins}/{n_games})")
     return wr
 
 # ── Curriculum opponent selection ─────────────────────────────────
 def select_opponents_by_curriculum(enemies_with_wr, phase):
-    """Select opponents matching current curriculum phase."""
     min_wr, max_wr = phase["min_wr"], phase["max_wr"]
     matching = [(name, fn, wr) for name, fn, wr in enemies_with_wr
                 if min_wr <= wr <= max_wr]
     if not matching:
-        # Fallback: pick closest
-        matching = sorted(enemies_with_wr, key=lambda x: abs(x[2] - (min_wr+max_wr)/2))[:3]
-        matching = [(n, f, w) for n, f, w in matching]
+        matching = sorted(enemies_with_wr,
+                          key=lambda x: abs(x[2] - (min_wr+max_wr)/2))[:3]
     return matching
 
 # ── Run one full training round ───────────────────────────────────
 def run_round(my_fn, my_name, enemies, round_num, curriculum_phase):
-    """
-    enemies = [(name, fn, wr), ...]  # with pre-evaluated win rates
-    Returns (all_new_records, match_results_list).
-    """
-    all_records  = []
+    all_records   = []
     match_results = []
-    
-    # Select opponents based on curriculum
+
     selected = select_opponents_by_curriculum(enemies, curriculum_phase)
     if not selected:
-        selected = enemies[:3]  # Fallback
-    
+        selected = enemies[:3]
+
     print(f"\n  [Curriculum: {curriculum_phase['name']}] Selected {len(selected)} opponents")
     for name, fn, wr in selected:
-        print(f"    - {name} (WR: {wr:.1%})")
+        print(f"    - {name} (FFA WR: {wr:.1%})")
 
-    total_1v1 = len(selected) * GAMES_PER_ENEMY
-    done = 0
+    ffa_opponents = sorted(selected, key=lambda x: x[2])[:3]
+    while len(ffa_opponents) < 3:
+        ffa_opponents.append(random.choice(selected))
 
-    # 1v1 vs each selected enemy
-    print(f"\n  [1v1] {my_name} vs selected enemies ({GAMES_PER_ENEMY} games each)")
-    for ename, efn, _ in selected:
-        w = l = d = 0
-        for g in range(GAMES_PER_ENEMY):
-            seed = SEED_BASE + round_num * 10000 + done
-            recs, rewards, steps, outcome = play_game(
-                [my_fn, efn], [my_name, ename],
-                seed=seed, html_path=None)
-            if abs(rewards[0]) > 0.01:
-                for pr in recs:
-                    all_records.extend(pr)
-            if outcome == "WIN":  w += 1
-            elif outcome == "LOSS": l += 1
-            else: d += 1
-            done += 1
-            pct = int(done / total_1v1 * 25)
-            sys.stdout.write(
-                f"\r    [{'#'*pct}{'-'*(25-pct)}] {done}/{total_1v1}"
-                f"  vs {ename}: W{w} L{l} D{d}  ({steps}st)")
-            sys.stdout.flush()
-        print()
-        match_results.append({"type":"1v1","enemy":ename,
-                               "wins":w,"losses":l,"draws":d,
-                               "win_rate": w/max(1,w+l+d)})
+    ffa = [(my_name, my_fn)] + [(n, f) for n, f, _ in ffa_opponents]
 
-    # Self-play: main vs previous snapshot (if exists)
-    snapshot_files = sorted(glob.glob(os.path.join(SNAPSHOT_DIR, "main_round_*.py")))
-    if snapshot_files and round_num > 3:
-        print(f"\n  [Self-play] vs round {len(snapshot_files)} snapshot")
-        try:
-            old_fn, old_name = load_agent(snapshot_files[-1], force=True)
-            seed = SEED_BASE + round_num * 10000 + 77777
-            recs, rewards, steps, outcome = play_game(
-                [my_fn, old_fn], [my_name, f"snapshot_r{len(snapshot_files)}"],
-                seed=seed, html_path=None)
-            if abs(rewards[0]) > 0.01:
-                for pr in recs:
-                    all_records.extend(pr)
-            print(f"    Result: {outcome}  ({steps} steps)")
-            match_results.append({"type":"self_play","enemy":old_name,
-                                   "outcome":outcome,"reward_diff":rewards[0]-rewards[1]})
-        except Exception as e:
-            print(f"    Self-play skipped: {e}")
+    print(f"\n  [FFA] {my_name} vs {', '.join(n for n,_,_ in ffa_opponents)} "
+          f"({FFA_GAMES_PER_ROUND} games)")
+    w = l = 0
+    for g in range(FFA_GAMES_PER_ROUND):
+        seed = SEED_BASE + round_num * 10000 + g
+        recs, rewards, steps, outcome = play_game(
+            [fn for _,fn in ffa], [nm for nm,_ in ffa],
+            seed=seed, html_path=None)
+
+        if max(abs(r) for r in rewards) > 0.01:
+            for pr in recs:
+                all_records.extend(pr)
+
+        if outcome == "WIN": w += 1
+        else:                l += 1
+
+        pct = int((g + 1) / FFA_GAMES_PER_ROUND * 25)
+        sys.stdout.write(
+            f"\r    [{'#'*pct}{'-'*(25-pct)}] {g+1}/{FFA_GAMES_PER_ROUND}"
+            f"  W{w} L{l}  ({steps}st)")
+        sys.stdout.flush()
+    print()
+    match_results.append({"type":"ffa","agents":[nm for nm,_ in ffa],
+                           "wins": w, "losses": l})
 
     return all_records, match_results
 
-# ── Data persistence ──────────────────────────────────────────────
+# ── Data helpers ──────────────────────────────────────────────────
 def save_records(records, round_num):
     path = os.path.join(DATA_DIR, f"records_{round_num:04d}.json")
     try:
@@ -302,23 +275,26 @@ def save_records(records, round_num):
     except Exception as e:
         print(f"  WARN save: {e}")
 
-def load_all_records():
+def load_recent_records(n_rounds=RECENT_ROUNDS):
+    """Only load the most recent N rounds to avoid stale data."""
+    all_files = sorted(glob.glob(os.path.join(DATA_DIR, "records_*.json")))
+    recent    = all_files[-n_rounds:] if len(all_files) > n_rounds else all_files
     out = []
-    for p in sorted(glob.glob(os.path.join(DATA_DIR,"records_*.json"))):
+    for p in recent:
         try:
             with open(p) as f:
                 out.extend(json.load(f))
         except: pass
     return out
 
-# ── Snapshot management ───────────────────────────────────────────
-def save_snapshot(round_num):
-    """Save current main.py as a snapshot for future self-play."""
-    if not os.path.exists(MAIN_PY):
-        return
-    dst = os.path.join(SNAPSHOT_DIR, f"main_round_{round_num:04d}.py")
-    shutil.copy(MAIN_PY, dst)
-    print(f"  Snapshot saved: {dst}")
+def balance_records(records):
+    """Equalise win/loss counts so the model trains on a 50/50 split."""
+    wins   = [r for r in records if r['won'] == 1]
+    losses = [r for r in records if r['won'] == 0]
+    n = min(len(wins), len(losses))
+    if n < 50:
+        return records
+    return random.sample(wins, n) + random.sample(losses, n)
 
 # ── GBC trainer + exporter ────────────────────────────────────────
 def train_and_export(all_records):
@@ -354,13 +330,13 @@ def train_and_export(all_records):
         return clf, roc_auc_score(yv, clf.predict_proba(Xv)[:,1])
 
     specs = [
-        ("GLOBAL", np.ones(len(X), bool), N_ESTIMATORS, MAX_DEPTH),
-        ("EARLY",  turns <= 100,          300, 5),
-        ("LATE",   turns >= 300,          300, 5),
-        ("MID",    (turns > 100) & (turns < 300), 250, 4),
+        ("GLOBAL", np.ones(len(X), bool),           N_ESTIMATORS, MAX_DEPTH),
+        ("EARLY",  turns <= 100,                     300, 5),
+        ("LATE",   turns >= 300,                     300, 5),
+        ("MID",    (turns > 100) & (turns < 300),   250, 4),
     ]
 
-    lines    = ["# AUTO-GENERATED by enhanced_train.py  --  do not edit", ""]
+    lines    = ["# AUTO-GENERATED by ffa_train.py  --  do not edit", ""]
     exported = []
     any_good = False
 
@@ -403,12 +379,12 @@ def train_and_export(all_records):
     return True
 
 # ── Win rate helpers ──────────────────────────────────────────────
-def compute_1v1_wr(match_results):
+def compute_ffa_wr(match_results):
     w = tot = 0
     for r in match_results:
-        if r["type"] == "1v1":
-            w   += r["wins"]
-            tot += r["wins"] + r["losses"] + r["draws"]
+        if r["type"] == "ffa":
+            w   += r.get("wins", 0)
+            tot += r.get("wins", 0) + r.get("losses", 0)
     return w / max(1, tot)
 
 def _bar(wr, width=25):
@@ -417,16 +393,15 @@ def _bar(wr, width=25):
 
 def print_round_summary(match_results, round_num):
     print(f"\n  Round {round_num} results:")
-    print(f"  {'Type':<14} {'Enemy':<22} {'W':>3} {'L':>3} {'D':>3} {'WR%':>5}")
-    print(f"  {'-'*52}")
+    print(f"  {'Type':<14} {'Agents':<30} {'W':>3} {'L':>3} {'WR%':>5}")
+    print(f"  {'-'*55}")
     for r in match_results:
-        if r["type"] == "1v1":
-            g  = r["wins"]+r["losses"]+r["draws"]
-            wr = r["wins"] / max(1,g) * 100
-            print(f"  {'1v1':<14} {r['enemy']:<22} "
-                  f"{r['wins']:>3} {r['losses']:>3} {r['draws']:>3} {wr:>5.0f}%")
-        elif r["type"] == "self_play":
-            print(f"  {'Self-play':<14} {r['enemy']:<22}  {r['outcome']}")
+        if r["type"] == "ffa":
+            ags = ", ".join(r["agents"][1:4])
+            g   = r.get("wins",0) + r.get("losses",0)
+            wr  = r.get("wins",0) / max(1,g) * 100
+            print(f"  {'FFA':<14} {ags[:30]} "
+                  f"{r.get('wins',0):>3} {r.get('losses',0):>3} {wr:>5.0f}%")
 
 def _print_trend(history):
     print(f"\n  Training progress:")
@@ -437,8 +412,8 @@ def _print_trend(history):
 # ── Main loop ─────────────────────────────────────────────────────
 def main():
     print("=" * 65)
-    print("  Orbit Wars -- Enhanced Training Loop v4.0")
-    print("  Features: Curriculum learning, Self-play, Diverse opponents")
+    print("  Orbit Wars -- FFA Training Loop v5.0")
+    print("  Fixes: Replay pretraining, balanced labels, FFA curriculum")
     print("=" * 65)
 
     enemy_files = sorted([
@@ -446,27 +421,45 @@ def main():
         if not os.path.basename(f).startswith("__")
     ])
     if not enemy_files:
-        print(f"WARNING: No .py files in '{ENEMY_DIR}'")
-        print("Creating placeholder enemy agents...")
-        os.makedirs(ENEMY_DIR, exist_ok=True)
-        # You should add your enemy agents to this directory
-        print("Please add enemy agent .py files to enemy_agents/ directory")
-        print("Examples: random_agent.py, greedy_agent.py, defensive_agent.py")
+        print(f"ERROR: No .py files in '{ENEMY_DIR}'")
         sys.exit(1)
 
     print(f"\nEnemy agents: {len(enemy_files)}")
     for f in enemy_files:
         print(f"  - {os.path.basename(f)}")
-    print(f"\nSettings: max_rounds={MAX_ROUNDS}  "
-          f"target={WIN_RATE_TARGET:.0%}  "
-          f"games_per_enemy={GAMES_PER_ENEMY}")
+    print(f"\nSettings: max_rounds={MAX_ROUNDS}  target={WIN_RATE_TARGET:.0%}  "
+          f"ffa_games={FFA_GAMES_PER_ROUND}  eval_games={EVAL_GAMES}")
 
-    existing = load_all_records()
-    print(f"Existing records: {len(existing)}")
+    # ── Replay pretraining ─────────────────────────────────────────
+    replay_records = []
+    replay_files   = glob.glob(os.path.join(RECORDS_DIR, "*.json"))
+    if replay_files:
+        print(f"\n  Found {len(replay_files)} replay files.")
+        try:
+            if ROOT not in sys.path:
+                sys.path.insert(0, ROOT)
+            from train_from_replays import get_balanced_replay_records
+            from train_from_replays import get_balanced_replay_records, get_val_records
+            replay_records = get_balanced_replay_records(max_per_cat=10000)
+            val_records    = get_val_records(max_per_cat=5000)
+            print(f"  Loaded {len(replay_records)} training + {len(val_records)} held-out val records.")
+            if not os.path.exists(VALUEFN):
+                print("  No value_fn.py found -- running replay pretraining...")
+                train_and_export(replay_records, val_records=val_records)
+                print("  Pretraining complete.")
+            else:
+                print("  value_fn.py exists -- replay records will mix in each round.")
+        except Exception as e:
+            print(f"  WARN: Replay load failed: {e}")
+    else:
+        print("  No replay files found. Skipping pretraining.")
+        val_records = []
 
-    history        = []
-    all_rounds_log = []
-    enemies_with_wr = None
+    print(f"  Recent self-play records available: {len(load_recent_records())}")
+
+    history           = []
+    all_rounds_log    = []
+    current_phase_idx = 0  # advances: easy -> medium -> hard
 
     for round_num in range(1, MAX_ROUNDS + 1):
         print(f"\n{'='*65}")
@@ -474,12 +467,10 @@ def main():
         print(f"{'='*65}")
         t0 = time.time()
 
-        # Reload main.py every round to pick up new value_fn.py
         my_fn, my_name = load_agent(MAIN_PY, force=True)
         vf_ok = os.path.exists(VALUEFN)
-        print(f"  main.py loaded  (value_fn.py: {'YES' if vf_ok else 'NO -- pure heuristic'})")
+        print(f"  main.py loaded  (value_fn.py: {'YES' if vf_ok else 'NO'})")
 
-        # Load all enemies
         enemies = []
         for ef in enemy_files:
             try:
@@ -488,46 +479,34 @@ def main():
             except Exception as e:
                 print(f"  WARN: {os.path.basename(ef)}: {e}")
         if not enemies:
-            print("No enemies loaded.")
+            print("No enemies loaded. Exiting.")
             sys.exit(1)
 
-        # Evaluate opponent strength (every 3 rounds or first round)
-        if enemies_with_wr is None or round_num % 3 == 1:
-            print(f"\n  Evaluating opponent strengths...")
-            enemies_with_wr = []
-            for ename, efn in enemies:
-                wr = evaluate_opponent_strength(my_fn, efn, ename, n_games=3)
-                enemies_with_wr.append((ename, efn, wr))
-            enemies_with_wr.sort(key=lambda x: x[2])  # Sort by win rate
+        # FFA-based curriculum evaluation every round
+        print(f"\n  Evaluating opponent strengths (FFA, {EVAL_GAMES} games each)...")
+        enemies_with_wr = []
+        all_enemy_fns   = [(n, f) for n, f in enemies]
+        for ename, efn in enemies:
+            wr = evaluate_opponent_ffa_strength(
+                my_fn, my_name, all_enemy_fns, ename, efn)
+            enemies_with_wr.append((ename, efn, wr))
+        enemies_with_wr.sort(key=lambda x: x[2])
 
-        # Determine curriculum phase based on current performance
+        phase     = CURRICULUM_PHASES[current_phase_idx]
         recent_wr = history[-1][1] if history else 0.0
-        if recent_wr < 0.4:
-            phase = CURRICULUM_PHASES[0]  # easy
-        elif recent_wr < 0.7:
-            phase = CURRICULUM_PHASES[1]  # medium
-        else:
-            phase = CURRICULUM_PHASES[2]  # hard
-        
-        print(f"\n  Current WR: {recent_wr:.1%} -> Using {phase['name']} curriculum")
+        print(f"\n  Phase: {phase['name']} ({current_phase_idx+1}/{len(CURRICULUM_PHASES)})  "
+              f"| Last WR: {recent_wr:.1%}  | Target: {WIN_RATE_TARGET:.0%}")
 
-        # Play all match types
-        new_records, match_results = run_round(my_fn, my_name, enemies_with_wr, round_num, phase)
-
-        # Persist records
+        new_records, match_results = run_round(
+            my_fn, my_name, enemies_with_wr, round_num, phase)
         save_records(new_records, round_num)
 
-        # Save snapshot for self-play
-        if round_num % 5 == 0:
-            save_snapshot(round_num)
-
-        # Print results
         print_round_summary(match_results, round_num)
-        wr      = compute_1v1_wr(match_results)
+        wr      = compute_ffa_wr(match_results)
         elapsed = time.time() - t0
         history.append((round_num, wr))
 
-        round_log = {"round": round_num, "win_rate_1v1": wr,
+        round_log = {"round": round_num, "win_rate_ffa": wr,
                      "elapsed_s": round(elapsed, 1),
                      "curriculum": phase["name"],
                      "match_results": match_results}
@@ -535,32 +514,39 @@ def main():
         with open(RESULTS_LOG, "w") as f:
             json.dump(all_rounds_log, f, indent=2)
 
-        print(f"\n  1v1 win rate: {_bar(wr)}  ({elapsed:.0f}s)")
+        print(f"\n  FFA win rate: {_bar(wr)}  ({elapsed:.0f}s)")
 
         if wr >= WIN_RATE_TARGET:
-            print(f"\n  TARGET REACHED!  {wr:.1%} >= {WIN_RATE_TARGET:.0%}")
-            _print_trend(history)
-            break
+            if current_phase_idx < len(CURRICULUM_PHASES) - 1:
+                current_phase_idx += 1
+                next_phase = CURRICULUM_PHASES[current_phase_idx]
+                print(f"\n  Phase '{phase['name']}' target reached ({wr:.1%})! "
+                      f"-> Advancing to '{next_phase['name']}'")
+            else:
+                print(f"\n  ALL PHASES COMPLETE!  Hard phase WR: {wr:.1%}")
+                _print_trend(history)
+                break
 
-        # Train value function from all accumulated data
+        # Train: recent self-play (balanced) + replay anchor
         print(f"\n  Training value function...")
-        all_records = load_all_records()
-        if len(all_records) > 15000:
-            all_records = random.sample(all_records, 15000)
-        print(f"  Total samples: {len(all_records)}")
-        train_and_export(all_records)
+        recent_sp = balance_records(load_recent_records(RECENT_ROUNDS))
+        if replay_records:
+            n_rep      = min(len(replay_records), REPLAY_MIX_SIZE)
+            replay_mix = random.sample(replay_records, n_rep)
+        else:
+            replay_mix = []
+        combined = recent_sp + replay_mix
+        print(f"  Self-play balanced: {len(recent_sp)}  |  "
+              f"Replay mix: {len(replay_mix)}  |  Total: {len(combined)}")
+        train_and_export(combined, val_records=val_records)
 
         _print_trend(history)
 
-        # Plateau check
         if len(history) >= 4:
             recent = [w for _, w in history[-4:]]
             if max(recent) - min(recent) < 0.03 and recent[-1] < WIN_RATE_TARGET:
                 print(f"\n  Win rate plateaued (~{recent[-1]:.1%} for 4 rounds).")
-                print("  Tips:")
-                print("    - Add stronger/different enemy agents")
-                print("    - Increase GAMES_PER_ENEMY for more training data")
-                print("    - Check if agent is overfitting to specific opponents")
+                print("  Consider adding stronger enemy agents.")
 
     else:
         print(f"\n  MAX_ROUNDS ({MAX_ROUNDS}) reached.")
@@ -568,15 +554,14 @@ def main():
     print(f"\n{'='*65}")
     print("  Training complete.")
     if history:
-        print(f"  Final 1v1 win rate : {history[-1][1]:.1%}  "
+        print(f"  Final FFA win rate: {history[-1][1]:.1%}  "
               f"(after round {history[-1][0]})")
-    print(f"  value_fn.py   : {VALUEFN}")
-    print(f"  Snapshots     : {SNAPSHOT_DIR}/")
-    print(f"  Training data : {DATA_DIR}/")
-    print(f"  Training log  : {RESULTS_LOG}")
-    print(f"\n  To submit:")
-    print(f"    zip submission.zip main.py value_fn.py")
+    print(f"  value_fn.py  : {VALUEFN}")
+    print(f"  Training data: {DATA_DIR}/")
+    print(f"  Training log : {RESULTS_LOG}")
+    print(f"\n  To submit: zip submission.zip main.py value_fn.py")
     print(f"{'='*65}")
+
 
 if __name__ == "__main__":
     main()

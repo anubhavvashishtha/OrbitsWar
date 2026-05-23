@@ -1,0 +1,164 @@
+==============================================================
+  OrbitsWar RL — Improvement Techniques (Prioritized)
+==============================================================
+
+--------------------------------------------------------------
+ QUICK WINS (implement first, high impact / low effort)
+--------------------------------------------------------------
+
+[ ] 1. REWARD SHAPING
+    Problem: only win/loss at turn 500 — gradient signal is too sparse
+    Fix: add intermediate rewards at each snapshot turn
+        r_t = 0.4 * delta_ship_fraction
+            + 0.4 * delta_production_fraction
+            + 0.2 * delta_planet_count_fraction
+    Where delta = (my_metric_t - my_metric_{t-1}) / total
+    Edit: self_play_trainer.py → play_game_collect(), inject r_t into trajectory
+    Expected gain: TD loss drops faster, value fn learns 3-5x quicker
+
+[ ] 2. SNAPSHOT EVERY TURN (not every 5)
+    Problem: SNAPSHOT_EVERY=5 means 100 training points per game instead of 500
+    Fix: change SNAPSHOT_EVERY = 1 in self_play_trainer.py
+    Trade-off: 5x more training data per game, slightly slower per round
+    Only do this after reward shaping is in place
+
+[ ] 3. MORE SELF-PLAY ROUNDS
+    Currently: 10 rounds x 8 games = 80 games total
+    Recommended: 30 rounds x 12 games = 360 games minimum for TD to converge
+    Run: python rl/ppo_agent.py --skip-replay --rounds 30 --games 12
+
+[ ] 4. COLLECT MORE REPLAYS (target: 1000+)
+    More diverse opponent strategies = stronger Phase 1 pretrain
+    Currently at 431 — doubling to 900 should push val_acc from 84% toward 88%+
+    Drop new JSONs into records/ and re-run: python rl/ppo_agent.py --resume
+
+--------------------------------------------------------------
+ MEDIUM EFFORT (implement after quick wins)
+--------------------------------------------------------------
+
+[ ] 5. ACTION SCORER NETWORK
+    Problem: RL currently only values board states, doesn't pick moves
+    Fix: extend OrbitsNet to score (board_state + action_features) pairs
+        action_features = [src_ships_frac, dst_owner, dst_ships_frac,
+                           src_to_dst_dist, is_attack, ships_sent_frac]  (~6 dims)
+        total input = 30 board + 6 action = 36 dims
+    At move time: generate top-N heuristic candidates, score each, pick max
+    Training: policy gradient (REINFORCE) — reward = shaped_reward sum
+    This gives RL actual control over moves, not just value signal
+
+[ ] 6. ABSTRACT ACTION SPACE (simpler alternative to #5)
+    Define 6 strategic intents, RL picks one, heuristic executes it:
+        0 = EXPAND        (best neutral planet)
+        1 = ATTACK_WEAK   (weakest enemy planet)
+        2 = ATTACK_LEADER (FFA: attack highest-production enemy)
+        3 = DEFEND        (reinforce most threatened planet)
+        4 = CONSOLIDATE   (pull ships to strongest owned planet)
+        5 = SWARM         (multi-source coordinated attack)
+    Network: 30 → 64 → 6 (softmax), train with PPO clip loss
+    Much easier than full action space, still gives RL real decision power
+
+[ ] 7. OPPONENT POOL EXPANSION
+    Problem: only 5 fixed enemies — agent overfits to their patterns
+    Fix: every 5 rounds, snapshot current main.py as a new "self" enemy
+         add it to the opponent pool for future rounds
+    Same logic as classifier/ffa_train.py's snapshot system
+    Prevents the agent from exploiting specific enemy weaknesses
+
+[ ] 8. PRIORITIZED EXPERIENCE REPLAY
+    Problem: all game states treated equally in TD batch
+    Fix: weight states by TD error magnitude — states where prediction
+         was most wrong get sampled more during training
+    High-error states = the most informative transitions
+    Store (state, target, td_error) → sample proportional to td_error
+
+--------------------------------------------------------------
+ ADVANCED (after agent is winning consistently)
+--------------------------------------------------------------
+
+[ ] 9. PROPER PPO (replace TD with PPO clip loss)
+    Current TD update has no clipping — large updates can destabilize value fn
+    PPO adds:  L_clip = min(r_t * A_t, clip(r_t, 1-ε, 1+ε) * A_t)
+    buffer.py already has GAE implemented — just need the clip loss in trainer
+    Add entropy bonus (β=0.01) to prevent premature policy collapse
+
+[ ] 10. SEPARATE POLICY + VALUE NETWORKS
+    Current: one network does everything (value only)
+    PPO proper: actor network (picks action) + critic network (estimates value)
+    Actor:  30 → 128 → 64 → N_actions (softmax)
+    Critic: 30 → 128 → 64 → 1 (win probability)
+    Share the 30→128 trunk, branch at 64
+    Reduces parameters, faster convergence
+
+[ ] 11. MULTI-STEP TD (n-step returns)
+    Current: TD(0) = one step lookahead only
+    Fix: TD(n) = look n steps ahead before bootstrapping
+        G_t = r_t + γr_{t+1} + γ²r_{t+2} + ... + γⁿV(s_{t+n})
+    n=5 is a good start — balances bias vs variance better than TD(0)
+    Especially helpful for long games like this (500 turns)
+
+[ ] 12. CURIOSITY / INTRINSIC REWARD
+    Problem: sparse reward → agent avoids unexplored strategies
+    Fix: add intrinsic reward for visiting novel board states
+        r_intrinsic = ||encoder(s_t) - encoder_target(s_t)||²
+    Encourages the agent to try unusual planet combos it hasn't seen
+    Helps escape local optima (e.g. always defending, never expanding)
+
+[ ] 13. OPPONENT MODELING
+    Train a small auxiliary network to predict enemy next move
+    Use its predictions as extra features fed into value/policy network
+    Gives RL awareness of "this enemy tends to rush — I should defend early"
+    Feature: append predicted_enemy_production_delta to 30-dim vector → 31 dims
+
+[ ] 14. MCTS ROLLOUTS AT INFERENCE (for strongest play)
+    At each turn, simulate K random futures using current value fn
+    Pick the action that leads to highest average future value
+    K=20-50 is enough given 500-turn horizon
+    This is how AlphaGo strengthened a mediocre policy into superhuman play
+    Expensive at submission time (~10s per turn) but very powerful if budget allows
+
+--------------------------------------------------------------
+ ARCHITECTURE TWEAKS
+--------------------------------------------------------------
+
+[ ] 15. ADD TURN ENCODING TO NETWORK INPUT
+    Currently turn is passed as parameter but not used in net.py
+    Fix: append sin(turn/500) and cos(turn/500) to feature vector (→ 32 dims)
+    Lets the network learn different strategies for early/mid/late game
+    Update OrbitsNet: Linear(32, 128) instead of Linear(30, 128)
+
+[ ] 16. INCREASE NETWORK CAPACITY
+    Current: 30→128→64→1  (~10K params)
+    Try:     30→256→128→64→1  (~45K params)
+    Only worth it after reward shaping + more data — otherwise just overfits
+
+[ ] 17. BATCH NORMALIZATION BEFORE EACH RELU
+    LayerNorm only on first layer currently
+    Add LayerNorm after Linear(128,64) as well — stabilizes deep TD training
+
+--------------------------------------------------------------
+ TRAINING INFRASTRUCTURE
+--------------------------------------------------------------
+
+[ ] 18. PARALLEL GAME COLLECTION
+    Run 4 games simultaneously using multiprocessing.Pool
+    4x speedup on Phase 2 with no code logic change
+    Add to self_play_trainer.py: pool.starmap(play_game_collect, game_args)
+
+[ ] 19. TENSORBOARD LOGGING
+    Log per-round: win_rate, td_loss, avg_value_estimate, value_std
+    Lets you spot collapse (value_std → 0) or divergence (td_loss spikes) early
+    Add: from torch.utils.tensorboard import SummaryWriter in self_play_trainer.py
+
+[ ] 20. ELO TRACKING
+    Assign each saved model checkpoint an ELO rating
+    Play new checkpoint vs last 3 checkpoints — only keep it if ELO improves
+    Prevents saving a worse model after a bad round
+
+==============================================================
+ RECOMMENDED ORDER
+==============================================================
+ Week 1:  #1 (reward shaping) → #3 (more rounds) → #4 (more replays)
+ Week 2:  #2 (snapshot every turn) → #7 (opponent pool) → #15 (turn encoding)
+ Week 3:  #5 or #6 (action picking) → #9 (PPO clip) → #18 (parallel games)
+ Later:   #11 → #13 → #14 (MCTS) when agent is already competitive
+==============================================================
