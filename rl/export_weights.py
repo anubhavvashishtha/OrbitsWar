@@ -64,16 +64,18 @@ def export(model_path=None, output_path=OUTPUT_PATH):
 
     p = {n: v.detach().numpy() for n, v in model.named_parameters()}
 
-    # Sequential: 0=Linear(30→128), 1=LayerNorm, [2=ReLU, 3=Dropout],
-    #             4=Linear(128→64), [5=ReLU], 6=Linear(64→1), [7=Sigmoid]
-    W1   = p['net.0.weight']                               # (128, 30)
-    b1   = p['net.0.bias']                                 # (128,)
-    ln_w = p.get('net.1.weight', np.ones(128))             # (128,)
-    ln_b = p.get('net.1.bias',   np.zeros(128))            # (128,)
-    W2   = p['net.4.weight']                               # (64, 128)
-    b2   = p['net.4.bias']                                 # (64,)
-    W3   = p['net.6.weight'][0]                            # (64,)
-    b3   = float(p['net.6.bias'][0])
+    # Actor-critic architecture (net.py):
+    #   trunk:       0=Linear(30→128), 1=LayerNorm, 4=Linear(128→64)
+    #   value_head:  0=Linear(64→1)  [Sigmoid applied in forward]
+    #   policy_head: Linear(64→6)    [not exported — only used during training]
+    W1   = p['trunk.0.weight']                               # (128, 30)
+    b1   = p['trunk.0.bias']                                 # (128,)
+    ln_w = p.get('trunk.1.weight', np.ones(128))             # (128,)
+    ln_b = p.get('trunk.1.bias',   np.zeros(128))            # (128,)
+    W2   = p['trunk.4.weight']                               # (64, 128)
+    b2   = p['trunk.4.bias']                                 # (64,)
+    W3   = p['value_head.0.weight'][0]                       # (64,)
+    b3   = float(p['value_head.0.bias'][0])
 
     def _f(a):
         return '[' + ','.join(f'{v:.8f}' for v in a.flatten()) + ']'

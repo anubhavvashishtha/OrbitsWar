@@ -1,16 +1,34 @@
 """
 rl/self_play_trainer.py
 =======================
-Fine-tune OrbitsNet via self-play against enemy agents using TD learning.
+Fine-tune OrbitsNet via PPO self-play against enemy agents.
+
+Architecture: actor-critic (shared trunk, value head + policy head).
+The policy head picks one of 6 strategic intents each turn.
+The chosen intent soft-adjusts scoring multipliers in main.py by
+monkey-patching the loaded module's constants before each agent call,
+then restoring them — no changes to main.py required.
+
+Intent table
+------------
+  0  EXPAND        — prioritise safe / contested neutral planets
+  1  ATTACK_WEAK   — focus on the enemy with fewest ships
+  2  ATTACK_LEADER — FFA: focus resources on the current leader
+  3  DEFEND        — prioritise rescue and reinforcement of own planets
+  4  CONSOLIDATE   — pull ships to rear, minimal aggression
+  5  SWARM         — multi-source coordinated attacks & crash exploits
 
 Each round:
-  1. Play GAMES_PER_ROUND FFA games (your agent vs enemy agents)
-  2. Collect per-turn state snapshots and final outcomes
-  3. Run TD(0) updates:  V(s_t) ← γ·V(s_{t+1})  for mid-game
-                         V(s_T) ← won            for terminal
-  4. Save checkpoint to rl/model.pt
+  1. Play GAMES_PER_ROUND FFA games — player 0 uses PPO policy,
+     enemies use their fixed heuristics.
+  2. For every step, sample intent from policy, patch main module
+     constants, call agent, store (state, action, log_prob, reward,
+     done, value) in RolloutBuffer.
+  3. PPO clip loss update over the collected rollout.
+  4. Save checkpoint to rl/model.pt.
 
-Run AFTER replay_trainer.py for best results (uses that checkpoint).
+Run AFTER replay_trainer.py for best results (that pretrains the value
+head on 1732 Kaggle replays before PPO starts).
 
 Usage
 -----
@@ -20,35 +38,78 @@ Usage
 import os, sys, glob, random, importlib.util, argparse
 from pathlib import Path
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+
 ROOT         = Path(__file__).parent
 PROJECT_ROOT = ROOT.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "classifier"))
 sys.path.insert(0, str(PROJECT_ROOT))
 
-try:
-    import torch
-    import torch.nn as nn
-    import torch.optim as optim
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
+from buffer import RolloutBuffer
 
 MODEL_PATH      = ROOT / "model.pt"
 BEST_MODEL_PATH = ROOT / "model_best.pt"
 ENEMY_DIR       = PROJECT_ROOT / "enemy agents"
 MAIN_PY         = PROJECT_ROOT / "main.py"
 
+# ── Hyper-parameters ─────────────────────────────────────────────────────────
 GAMES_PER_ROUND = 8
 N_ROUNDS        = 10
-LR              = 1e-4
+LR              = 3e-4
 GAMMA           = 0.99
+GAE_LAMBDA      = 0.95
+CLIP_EPS        = 0.2
+VAL_COEF        = 0.5
+ENT_COEF        = 0.01
+PPO_EPOCHS      = 4
 BATCH_SIZE      = 256
-TD_EPOCHS       = 3
-SNAPSHOT_EVERY  = 5
+SNAPSHOT_EVERY  = 1      # capture every turn (TODO #4 — dense transitions)
+
+# ── Intent names (for logging) ────────────────────────────────────────────────
+INTENT_NAMES = [
+    "EXPAND", "ATTACK_WEAK", "ATTACK_LEADER",
+    "DEFEND", "CONSOLIDATE", "SWARM",
+]
+
+# Default multiplier values from main.py (restored after each call)
+_DEFAULTS = {
+    "SAFE_NEUTRAL_VALUE_MULT":      1.2,
+    "CONTESTED_NEUTRAL_VALUE_MULT": 0.7,
+    "HOSTILE_TARGET_VALUE_MULT":    1.85,
+    "REINFORCE_VALUE_MULT":         1.35,
+    "SWARM_VALUE_MULT":             1.05,
+    "SWARM_SCORE_MULT":             1.06,
+    "CRASH_EXPLOIT_VALUE_MULT":     1.18,
+}
+
+# Per-intent multiplier overrides — soft adjustments, not hard gates
+INTENT_MULTS = [
+    # 0 EXPAND: neutral-first
+    {"SAFE_NEUTRAL_VALUE_MULT": 2.0, "CONTESTED_NEUTRAL_VALUE_MULT": 1.1,
+     "HOSTILE_TARGET_VALUE_MULT": 0.75},
+    # 1 ATTACK_WEAK: aggressive vs weakest enemy
+    {"HOSTILE_TARGET_VALUE_MULT": 2.5, "SAFE_NEUTRAL_VALUE_MULT": 0.7,
+     "CONTESTED_NEUTRAL_VALUE_MULT": 0.5},
+    # 2 ATTACK_LEADER: FFA focus on leader (main.py already has 1.20× for leader planets)
+    {"HOSTILE_TARGET_VALUE_MULT": 2.2, "SAFE_NEUTRAL_VALUE_MULT": 0.8,
+     "CONTESTED_NEUTRAL_VALUE_MULT": 0.6},
+    # 3 DEFEND: reinforce and rescue priority
+    {"REINFORCE_VALUE_MULT": 2.5, "HOSTILE_TARGET_VALUE_MULT": 0.5,
+     "SAFE_NEUTRAL_VALUE_MULT": 0.6, "CONTESTED_NEUTRAL_VALUE_MULT": 0.4},
+    # 4 CONSOLIDATE: pull ships back, minimal aggression
+    {"REINFORCE_VALUE_MULT": 2.2, "HOSTILE_TARGET_VALUE_MULT": 0.4,
+     "SAFE_NEUTRAL_VALUE_MULT": 0.4, "CONTESTED_NEUTRAL_VALUE_MULT": 0.3},
+    # 5 SWARM: coordinated multi-source attacks
+    {"SWARM_VALUE_MULT": 1.9, "SWARM_SCORE_MULT": 1.5,
+     "CRASH_EXPLOIT_VALUE_MULT": 1.8, "HOSTILE_TARGET_VALUE_MULT": 1.65},
+]
 
 
-# ── Helpers shared with ffa_train.py ─────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def load_agent(path, force=False):
     name = Path(path).stem
     d    = str(Path(path).parent)
@@ -66,8 +127,8 @@ def load_agent(path, force=False):
 
 def snap(raw_p, comet_ids=None):
     cids = comet_ids or set()
-    return [{'id':p[0],'owner':p[1],'ships':p[5],
-             'production':p[6],'x':p[2],'y':p[3]}
+    return [{"id": p[0], "owner": p[1], "ships": p[5],
+             "production": p[6], "x": p[2], "y": p[3]}
             for p in raw_p if p[0] not in cids]
 
 
@@ -76,125 +137,212 @@ def _read(obs, key, default=None):
     return getattr(obs, key, default)
 
 
-# ── Game runner ───────────────────────────────────────────────────────────
-def play_game_collect(agent_fns, agent_names, seed=0):
+def _patch_main(main_mod, intent: int):
+    """Apply intent multipliers to the main module; returns original values."""
+    orig = {}
+    for k, v in INTENT_MULTS[intent].items():
+        orig[k] = getattr(main_mod, k, _DEFAULTS.get(k))
+        setattr(main_mod, k, v)
+    return orig
+
+
+def _restore_main(main_mod, orig: dict):
+    for k, v in orig.items():
+        if v is not None:
+            setattr(main_mod, k, v)
+
+
+# ── Reward shaping (TODO #1) ──────────────────────────────────────────────────
+REWARD_SCALE = 0.1   # keeps shaped part small so terminal win/loss dominates
+
+def _game_stats(sd, player):
+    """Sum my/total ships, production, planet count from a snap list."""
+    my_ships = my_prod = my_planets = total_ships = total_prod = 0.0
+    total_planets = float(len(sd))
+    for p in sd:
+        sh = float(p.get("ships", 0))
+        pr = float(p.get("production", 0))
+        total_ships += sh
+        total_prod  += pr
+        if p.get("owner") == player:
+            my_ships   += sh
+            my_prod    += pr
+            my_planets += 1.0
+    return (my_ships, my_prod, my_planets, total_ships, total_prod, total_planets)
+
+
+def _shaped_reward(curr, prev):
     """
-    Play one FFA game, collect per-turn state snapshots for each player.
-    Returns: trajectories  (list of lists of dicts with 'feats', 'turn', 'won')
-             rewards        list of final rewards
-             outcome        'WIN' | 'LOSS' | 'DRAW'
+    r_t = 0.4*(d_ship_share) + 0.4*(d_prod_share) + 0.2*(d_planet_share)
+    Scaled by REWARD_SCALE so terminal reward (1.0) stays dominant.
+    """
+    my_s, my_pr, my_pl, tot_s, tot_pr, tot_pl = curr
+    ps,   ppr,   ppl,   _,     _,      _      = prev
+    d_ships   = (my_s  - ps)  / max(1.0, tot_s)
+    d_prod    = (my_pr - ppr) / max(1.0, tot_pr)
+    d_planets = (my_pl - ppl) / max(1.0, tot_pl)
+    return REWARD_SCALE * (0.4 * d_ships + 0.4 * d_prod + 0.2 * d_planets)
+
+
+# ── Game runner ───────────────────────────────────────────────────────────────
+def play_game_collect(model, agent_fns, seed: int = 0):
+    """
+    Play one FFA game. Player 0 uses the PPO policy to pick intents.
+    Returns (RolloutBuffer for player 0, outcome string).
     """
     from train_from_replays import extract_features
     from kaggle_environments import make
 
-    n   = len(agent_fns)
-    env = make("orbit_wars",
-               configuration={"seed": seed, "randomSeed": seed},
-               debug=False)
+    n       = len(agent_fns)
+    env     = make("orbit_wars",
+                   configuration={"seed": seed, "randomSeed": seed},
+                   debug=False)
     env.reset(num_agents=n)
-    trajectories = [[] for _ in range(n)]
+
+    buf        = RolloutBuffer(gamma=GAMMA, lam=GAE_LAMBDA)
+    main_mod   = sys.modules.get("main")
+    prev_stats = None   # for shaped reward computation
+
     states = env.step([[]] * n)
     step   = 0
 
     while True:
         st0    = states[0]
-        status = str(_read(st0, 'status', 'ACTIVE'))
-        if status != 'ACTIVE':
+        status = str(_read(st0, "status", "ACTIVE"))
+        if status != "ACTIVE":
             break
 
-        obss = [_read(s, 'observation') for s in states]
+        obss = [_read(s, "observation") for s in states]
 
-        if step % SNAPSHOT_EVERY == 0 and obss[0] is not None:
-            rp = _read(obss[0], 'planets', []) or []
-            ci = set(_read(obss[0], 'comet_planet_ids', []) or [])
-            rf = _read(obss[0], 'fleets', []) or []
+        # ── Feature extraction & intent sampling for player 0 ──────────────
+        intent       = 0
+        log_prob_val = 0.0
+        value_val    = 0.5
+        feats        = None
+        shaped_r     = 0.0
+
+        if obss[0] is not None and step % SNAPSHOT_EVERY == 0:
+            rp = _read(obss[0], "planets", []) or []
+            ci = set(_read(obss[0], "comet_planet_ids", []) or [])
+            rf = _read(obss[0], "fleets", []) or []
             sd = snap(rp, ci)
             if sd:
-                for i in range(n):
-                    feats = extract_features(sd, i, step, n, fleets=rf)
-                    trajectories[i].append({'feats': feats, 'turn': step})
+                curr_stats = _game_stats(sd, 0)
+                if prev_stats is not None:
+                    shaped_r = _shaped_reward(curr_stats, prev_stats)
+                prev_stats = curr_stats
 
+                n_p = max(2, len({p[1] for p in rp if p[1] != -1}))
+                feats = extract_features(sd, 0, step, n_p, fleets=rf)
+                with torch.no_grad():
+                    model.eval()
+                    ft               = torch.FloatTensor(feats).unsqueeze(0)
+                    value_t, logits_t = model(ft)
+                    dist             = torch.distributions.Categorical(logits=logits_t)
+                    intent_t         = dist.sample()
+                    intent           = int(intent_t.item())
+                    log_prob_val     = float(dist.log_prob(intent_t).item())
+                    value_val        = float(value_t.item())
+
+        # ── Patch main module constants for chosen intent ──────────────────
+        orig = {}
+        if main_mod is not None:
+            orig = _patch_main(main_mod, intent)
+
+        # ── Execute all agents ─────────────────────────────────────────────
         actions = []
         for i, obs in enumerate(obss):
             try:    a = agent_fns[i](obs)
             except: a = []
             actions.append(a or [])
+
+        if main_mod is not None:
+            _restore_main(main_mod, orig)
+
+        # ── Store transition with shaped reward ────────────────────────────
+        if feats is not None:
+            buf.add(feats, intent, log_prob_val, shaped_r, False, value_val)
+
         states = env.step(actions)
         step  += 1
 
-    rewards = [float(_read(s, 'reward', 0) or 0) for s in states]
+    # ── Override terminal step reward with win/loss ────────────────────────
+    rewards = [float(_read(s, "reward", 0) or 0) for s in states]
     max_r   = max(rewards)
     winner  = -1 if max_r <= 0 else rewards.index(max_r)
 
-    for i, traj in enumerate(trajectories):
-        won = 1.0 if i == winner else 0.0
-        for snap_d in traj:
-            snap_d['won'] = won
+    if buf.rewards:
+        buf.rewards[-1] = 1.0 if winner == 0 else 0.0
+        buf.dones[-1]   = True
 
     outcome = "WIN" if winner == 0 else ("DRAW" if winner < 0 else "LOSS")
-    return trajectories, rewards, outcome
+    return buf, outcome
 
 
-# ── TD update ─────────────────────────────────────────────────────────────
-def td_update(model, optimizer, trajectories):
-    """
-    Temporal-difference (TD-0) update over all players' trajectories.
-      mid-game:  target = γ · V(s_{t+1})
-      terminal:  target = won  (sparse outcome reward)
-    """
-    criterion = nn.MSELoss()
-    model.train()
-
-    all_states, all_targets = [], []
-    for traj in trajectories:
-        if not traj:
-            continue
-        won = traj[0].get('won', 0.0)
-        n   = len(traj)
-        for idx, s in enumerate(traj):
-            if idx == n - 1:
-                target = won
-            else:
-                nf = traj[idx + 1]['feats']
-                with torch.no_grad():
-                    next_v = float(model(torch.FloatTensor(nf).unsqueeze(0)))
-                target = GAMMA * next_v + 0.05 * won  # small outcome anchor
-            all_states.append(s['feats'])
-            all_targets.append(target)
-
-    if not all_states:
+# ── PPO update ────────────────────────────────────────────────────────────────
+def ppo_update(model, optimizer, buf: RolloutBuffer):
+    """PPO clip loss over one rollout buffer (one game's worth of data)."""
+    if len(buf) < 2:
         return 0.0
 
-    X = torch.FloatTensor(all_states)
-    Y = torch.FloatTensor(all_targets)
-    idx_list = list(range(len(X)))
+    states, actions, old_log_probs, returns, advantages = buf.as_arrays()
 
+    X    = torch.FloatTensor(states)
+    A    = torch.LongTensor(actions)
+    oldp = torch.FloatTensor(old_log_probs)
+    R    = torch.FloatTensor(returns)
+    Adv  = torch.FloatTensor(advantages)
+    # Normalise advantages for stable training
+    Adv  = (Adv - Adv.mean()) / (Adv.std() + 1e-8)
+
+    idx_list   = list(range(len(X)))
     total_loss = 0.0
-    for _ in range(TD_EPOCHS):
+    n_updates  = 0
+
+    model.train()
+    for _ in range(PPO_EPOCHS):
         random.shuffle(idx_list)
         for start in range(0, len(idx_list), BATCH_SIZE):
             batch = idx_list[start:start + BATCH_SIZE]
+            bx    = X[batch]
+
+            values, logits = model(bx)
+            dist       = torch.distributions.Categorical(logits=logits)
+            new_log_p  = dist.log_prob(A[batch])
+            entropy    = dist.entropy().mean()
+
+            ratio   = torch.exp(new_log_p - oldp[batch])
+            adv_b   = Adv[batch]
+            L_clip  = torch.min(
+                ratio * adv_b,
+                torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * adv_b
+            ).mean()
+            L_val   = F.mse_loss(values, R[batch])
+            loss    = -L_clip + VAL_COEF * L_val - ENT_COEF * entropy
+
             optimizer.zero_grad()
-            loss = criterion(model(X[batch]), Y[batch])
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
+
             total_loss += loss.item()
+            n_updates  += 1
 
-    return total_loss / max(1, (len(idx_list) // BATCH_SIZE) * TD_EPOCHS)
+    return total_loss / max(1, n_updates)
 
 
-# ── Main loop ─────────────────────────────────────────────────────────────
-def train(n_rounds=N_ROUNDS, games_per_round=GAMES_PER_ROUND):
-    if not TORCH_AVAILABLE:
-        print("Install PyTorch:  pip install torch"); return
-
+# ── Main loop ─────────────────────────────────────────────────────────────────
+def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
     from net import OrbitsNet
 
     model = OrbitsNet()
     if MODEL_PATH.exists():
-        model.load_state_dict(torch.load(MODEL_PATH, weights_only=True))
-        print(f"Loaded model from {MODEL_PATH}")
+        try:
+            model.load_state_dict(torch.load(MODEL_PATH, weights_only=True))
+            print(f"Loaded model from {MODEL_PATH}")
+        except Exception as e:
+            print(f"Architecture mismatch ({e}) — starting from random weights.")
+            print("Tip: run replay_trainer.py first to pretrain the value head.\n")
     else:
         print("No model.pt found — starting from random weights.")
         print("Tip: run replay_trainer.py first for a better starting point.\n")
@@ -215,32 +363,35 @@ def train(n_rounds=N_ROUNDS, games_per_round=GAMES_PER_ROUND):
     if not enemies:
         print(f"No enemy agents found in {ENEMY_DIR}"); return
 
-    print(f"\nSelf-play TD: {n_rounds} rounds × {games_per_round} games\n{'='*55}")
+    print(f"\nPPO self-play: {n_rounds} rounds × {games_per_round} games")
+    print(f"Intents: {', '.join(f'{i}={n}' for i, n in enumerate(INTENT_NAMES))}")
+    print("=" * 60)
 
-    best_wr     = 0.0
-    no_improve  = 0
-
-    # load existing best if present
-    if BEST_MODEL_PATH.exists():
-        best_wr = 0.0  # unknown — start tracking from here
+    best_wr    = 0.0
+    no_improve = 0
 
     for rnd in range(1, n_rounds + 1):
         wins = losses = draws = 0
         round_loss = 0.0
+        intent_counts = [0] * len(INTENT_NAMES)
 
         for g in range(games_per_round):
             fillers = random.choices(enemies, k=min(3, len(enemies)))
-            fns     = [my_fn]   + [fn for _, fn in fillers]
-            names   = [my_name] + [nm for nm, _  in fillers]
+            fns     = [my_fn] + [fn for _, fn in fillers]
             seed    = 42 + rnd * 1000 + g
 
             try:
-                trajs, _, outcome = play_game_collect(fns, names, seed=seed)
+                buf, outcome = play_game_collect(model, fns, seed=seed)
             except Exception as e:
                 print(f"\n  game error: {e}"); continue
 
-            loss = td_update(model, optimizer, trajs)
+            # tally intent distribution for this game
+            for a in buf.actions:
+                intent_counts[a] += 1
+
+            loss = ppo_update(model, optimizer, buf)
             round_loss += loss
+            buf.clear()
 
             if   outcome == "WIN":  wins   += 1
             elif outcome == "LOSS": losses += 1
@@ -249,13 +400,23 @@ def train(n_rounds=N_ROUNDS, games_per_round=GAMES_PER_ROUND):
             sys.stdout.write(
                 f"\r  Round {rnd}/{n_rounds}  game {g+1}/{games_per_round}"
                 f"  W:{wins} L:{losses} D:{draws}"
-                f"  td_loss={round_loss/(g+1):.4f}  ")
+                f"  ppo_loss={round_loss/(g+1):.4f}  "
+            )
             sys.stdout.flush()
 
-        wr = wins / games_per_round
+        wr       = wins / games_per_round
         avg_loss = round_loss / games_per_round
 
-        # always save latest
+        # Intent distribution summary
+        total_steps = sum(intent_counts)
+        if total_steps > 0:
+            intent_pct = "  ".join(
+                f"{INTENT_NAMES[i][0]}:{100*c/total_steps:.0f}%"
+                for i, c in enumerate(intent_counts)
+            )
+        else:
+            intent_pct = "no steps"
+
         torch.save(model.state_dict(), MODEL_PATH)
 
         if wr > best_wr:
@@ -266,14 +427,13 @@ def train(n_rounds=N_ROUNDS, games_per_round=GAMES_PER_ROUND):
         else:
             no_improve += 1
             tag = f"  (no improvement, best={best_wr:.1%}, streak={no_improve})"
-            # restore best weights so next round starts from the best known state
             if BEST_MODEL_PATH.exists():
                 model.load_state_dict(torch.load(BEST_MODEL_PATH, weights_only=True))
 
-        print(f"\n  -> WR={wr:.1%}  avg_td_loss={avg_loss:.4f}{tag}")
+        print(f"\n  -> WR={wr:.1%}  avg_ppo_loss={avg_loss:.4f}{tag}")
+        print(f"     intents: {intent_pct}")
 
-    print(f"\nSelf-play training complete.  Best WR={best_wr:.1%}")
-    # return best model
+    print(f"\nPPO self-play complete.  Best WR={best_wr:.1%}")
     if BEST_MODEL_PATH.exists():
         model.load_state_dict(torch.load(BEST_MODEL_PATH, weights_only=True))
         torch.save(model.state_dict(), MODEL_PATH)

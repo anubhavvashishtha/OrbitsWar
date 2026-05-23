@@ -1,0 +1,499 @@
+==============================================================
+  OrbitsWar Agent — Strategy Document
+  Agent v4.0 | Updated 2026-05-23
+==============================================================
+A plain-English description of every strategic decision the
+agent makes, in the order it makes them each turn.
+==============================================================
+
+
+──────────────────────────────────────────────────────────────
+ 1. WORLD MODEL — WHAT THE AGENT KNOWS
+──────────────────────────────────────────────────────────────
+
+Before making any decision, the agent builds a complete picture
+of the game state from the raw observation:
+
+  - Every planet's owner, ship count, production rate, and
+    orbital position (static vs. rotating around the sun).
+  - Every fleet in transit: owner, angle of travel, ship count.
+  - The angular velocity of the sun's orbit (used to predict
+    where rotating planets will be in future turns).
+  - Comet planets: special planets that move along a fixed path
+    and disappear after their path ends.
+
+From this it computes aggregates per player:
+  - Total ships (planets + in-transit fleets)
+  - Total production rate
+  - The strongest single enemy (used in FFA mode detection)
+
+It also pre-computes per-planet timelines: simulating all
+incoming fleet arrivals up to 110 turns ahead to know exactly
+when each planet will fall, who will own it, and how many ships
+will be needed to hold or capture it at any given moment.
+
+
+──────────────────────────────────────────────────────────────
+ 2. GAME PHASE DETECTION
+──────────────────────────────────────────────────────────────
+
+The agent tracks four time-based phases:
+
+  EARLY   — first 40 turns. Expand fast, avoid risky fights.
+  OPENING — first 80 turns. Beam-search opening is still active.
+  LATE    — last 60 turns. Prioritise immediate ship value
+            alongside production; time for fleet to arrive
+            and produce profit is running out.
+  VERY LATE — last 25 turns. Only commit if arrival is
+              guaranteed before game end.
+
+
+──────────────────────────────────────────────────────────────
+ 3. STRATEGIC MODE — DOMINATION ASSESSMENT
+──────────────────────────────────────────────────────────────
+
+Every turn the agent measures domination:
+
+  In 1v1:  (my_total_ships - enemy_total_ships) / total_ships
+  In FFA:  (my_total_ships - strongest_enemy_ships) / combined
+
+  Note: FFA uses the strongest single enemy, not the sum of all
+  enemies. Comparing against the sum would make the agent
+  permanently "behind" even when winning.
+
+From the domination score it sets three flags:
+
+  IS_BEHIND    (domination < -0.20)
+    Agent is losing. Tighten margins, deprioritise risky
+    rotating neutrals, prefer safe expansion and defence.
+
+  IS_AHEAD     (domination > +0.18)
+    Agent is winning. Slightly looser attack margins,
+    contest neutrals more aggressively.
+
+  IS_FINISHING (domination > +0.35 AND my_production >
+               max_enemy_production × 1.25 AND turn > 100)
+    Agent is about to win. Bonus multiplier on attacking
+    remaining enemy planets to close out the game.
+    Rear staging moves more ships to the front.
+
+In FFA, the agent also identifies the current leader (the
+strongest enemy by total ships) and applies a 20% bonus to
+attacking that player's planets, preventing runaway victories.
+
+
+──────────────────────────────────────────────────────────────
+ 4. FLEET BUDGET — WHAT CAN BE SPENT
+──────────────────────────────────────────────────────────────
+
+Before evaluating any attack, the agent computes a safe
+spending budget for each of its planets:
+
+  EXACT RESERVE  — the minimum ships needed to survive every
+                   known incoming enemy fleet over the next
+                   110 turns. Computed via binary search on
+                   the pre-simulated timeline.
+
+  PROACTIVE KEEP — extra ships held back for enemies that are
+                   within 12 turns of arrival even if they
+                   haven't launched yet. In FFA, this window
+                   expands to 14 turns and considers multiple
+                   enemies stacking in the same window.
+
+  ATTACK BUDGET  = current ships − max(exact_reserve,
+                                        proactive_keep)
+
+Only the attack budget is available for offensive launches.
+Reserve ships cannot be spent on any mission.
+
+
+──────────────────────────────────────────────────────────────
+ 5. REACTION TIME MAP — WHO IS CLOSER
+──────────────────────────────────────────────────────────────
+
+For every non-owned planet the agent computes:
+  - my_reaction_time:    minimum turns for any of my planets
+                         to reach this target
+  - enemy_reaction_time: minimum turns for any enemy planet
+                         to reach this target
+
+These determine neutral planet classification:
+
+  SAFE NEUTRAL     my_t ≤ enemy_t − 2
+    I can get there first with a 2-turn margin. Full value.
+
+  CONTESTED NEUTRAL  |my_t − enemy_t| ≤ 2
+    Roughly equidistant. Reduced value (70%), larger send margin.
+
+  ENEMY CLOSER     my_t > enemy_t + 2
+    Enemy gets there first. Low priority unless snipe available.
+
+
+──────────────────────────────────────────────────────────────
+ 6. TARGET VALUE — HOW TARGETS ARE SCORED
+──────────────────────────────────────────────────────────────
+
+Every potential target is scored as:
+
+  base_value = production × turns_remaining_after_arrival
+             + indirect_wealth × (nearby production density)
+
+Then multiplied by situational factors:
+
+  Static planets (outer orbit, don't move):  +40-55% bonus
+  Hostile enemy planet:                      +85% bonus
+  Hostile planet in opening game:            +45% bonus
+  Safe neutral:                              +20% bonus
+  Contested neutral:                         −30% penalty
+  Early game neutral:                        +20% bonus
+  Comet planet:                              −35% penalty (risky)
+  FFA: attacking the current leader:         +20% bonus
+  Behind and targeting rotating neutral:     −8% penalty
+  Finishing mode, targeting enemy:           +15% bonus
+
+In late game, ship count on the planet itself adds direct value
+(ships × 0.6), since there's less time to profit from production.
+
+If an enemy is nearly eliminated (total ships ≤ 45), attacking
+their planets adds a flat elimination bonus of 18 points, since
+removing a player from FFA or 1v1 has outsized strategic value.
+
+
+──────────────────────────────────────────────────────────────
+ 7. INDIRECT WEALTH — NEIGHBOURHOOD VALUE
+──────────────────────────────────────────────────────────────
+
+A planet's value is also boosted if it is surrounded by
+high-production planets. The agent computes an "indirect wealth"
+score for each planet based on weighted distances to neighbours:
+
+  Friendly nearby planets:  low weight (already owned)
+  Neutral nearby planets:   medium weight
+  Enemy nearby planets:     high weight (attacking from there
+                            gives access to their planets)
+
+This rewards capturing planets that act as staging points into
+enemy or neutral territory.
+
+
+──────────────────────────────────────────────────────────────
+ 8. OPENING PHASE — BEAM SEARCH TRAJECTORY (turns 0-50, 1v1)
+──────────────────────────────────────────────────────────────
+
+In 1v1 games during the opening, before running the main
+heuristic planner, the agent runs a beam search trajectory
+planner that finds the optimal sequence of planet captures.
+
+The beam search:
+  - Considers all permutations of capture order up to depth 5
+  - Evaluates each plan by simulating capture times and
+    production gain across the remaining game length
+  - Scores plans by total production × turns_left_after_capture
+  - Keeps the top 8 plans per depth level (beam width)
+  - Launches only the moves due this turn (t_launch == 0)
+
+The beam search runs for up to 0.8 seconds of wall time.
+If it finds nothing executable, falls back to the main planner.
+
+The EAM opening is disabled in FFA (4-player) games because
+FFA dynamics require reactive play from turn 1, not a
+pre-planned capture sequence.
+
+
+──────────────────────────────────────────────────────────────
+ 9. MISSION PLANNING — THE MAIN PLANNER
+──────────────────────────────────────────────────────────────
+
+After the opening (or in FFA from turn 0), the agent builds
+a priority queue of missions from multiple sources and executes
+them in score order.
+
+Each mission type is described below.
+
+
+ 9a. RESCUE MISSIONS (highest priority defensive)
+ ─────────────────────────────────────────────────
+ A rescue is triggered when a planet is projected to fall to an
+ enemy within 28 turns. The agent looks for a friendly planet
+ that can send reinforcements and arrive before the fall turn.
+
+ Score = (production × saved_turns + ships × 0.55) ÷ (sent + travel × 0.4)
+ Frontier planets (close to enemies) get a 12% score bonus.
+
+
+ 9b. RECAPTURE MISSIONS
+ ─────────────────────
+ When a rescue is impossible, the agent plans to take back the
+ planet after it falls. It looks for a friendly source that can
+ arrive within 10 turns after the projected fall, capturing the
+ weakened planet before the enemy can fortify it.
+
+
+ 9c. REINFORCE MISSIONS
+ ──────────────────────
+ Proactive reinforcement for threatened planets that don't face
+ imminent attack but are projected to fall within the simulation
+ horizon. The agent ships just enough from a nearby ally to
+ extend the hold period, with a safety margin of +2 ships.
+ Only used when ≥40 turns remain and source production ≥ 2.
+
+
+ 9d. SINGLE-SOURCE CAPTURE
+ ─────────────────────────
+ The main attack type. For each of my planets vs each non-owned
+ target:
+  1. Estimate travel time with prediction (for rotating planets)
+  2. Compute minimum ships needed to own the target at arrival
+  3. Add safety margin (scales with production, contested status,
+     FFA mode, travel distance, and finishing bonus)
+  4. Score = value ÷ (ships_sent + travel_turns × 0.55)
+  5. Apply RL boost if value function is loaded
+
+ Ship count sent is dynamically solved via binary search — the
+ agent finds the exact minimum needed, then adds margin.
+
+
+ 9e. SNIPE MISSIONS
+ ──────────────────
+ When an enemy fleet is heading to a neutral planet, the agent
+ tries to arrive at the same turn or one turn later and "snipe"
+ the planet just as the enemy fleet arrives. The enemy fleet
+ cancels out with the neutral garrison, leaving the planet
+ nearly empty for a cheap capture.
+
+ The agent synchronises its arrival within ±1 turn of the enemy
+ fleet ETA. It sends the minimum needed to own the planet at
+ that exact turn, accounting for both the garrison and the
+ arriving enemy ships.
+
+
+ 9f. CRASH EXPLOIT MISSIONS (FFA only)
+ ──────────────────────────────────────
+ In 4-player games, multiple enemies often send fleets to the
+ same planet simultaneously. When two different enemies are
+ projected to arrive within a 2-turn window, their fleets will
+ partially cancel each other out. The agent detects these
+ "crash" events and sends a fleet to arrive 1 turn after the
+ crash, capturing the weakened planet cheaply.
+ Only attempts this if the combined crashing fleet is ≥ 10 ships.
+
+
+ 9g. SWARM MISSIONS — PAIR AND TRIO ATTACKS
+ ───────────────────────────────────────────
+ When no single source can capture a target, the agent
+ considers coordinated multi-source attacks:
+
+ PAIR SWARM: Two sources whose ETAs to the target differ by
+   at most 2 turns (1 turn for enemy planets). Neither source
+   can capture alone. Together they can. Their arrivals are
+   treated as simultaneous for ownership resolution.
+
+ TRIO SWARM: Same logic for three sources, with a tighter
+   ETA tolerance of 1 turn and a penalty score multiplier (0.93)
+   since coordination cost is higher. Only attempted on enemy
+   planets with ≥ 20 ships garrison.
+
+ RL boost from the single-source evaluation phase is reused for
+ swarm scoring, so the neural net signal influences swarm picks
+ without re-running the forward simulation per swarm.
+
+
+ 9h. TOTAL SWARM (tot_swarm)
+ ────────────────────────────
+ A variant that uses ALL available friendly sources, not just
+ pairs. It anchors to the slowest source's arrival time, adds
+ production accumulation during the delay period, and checks
+ whether the projected combined force can capture the target.
+ Sources that can launch immediately (delay ≤ 1 turn) execute.
+
+
+ 9i. SYNC SWARM
+ ───────────────
+ A more precise version of swarm: groups sources by arrival
+ time window, finds clusters of 2-4 sources whose ETAs fall
+ within 1 turn of each other, and only accepts a swarm where
+ no single source can do the job alone (enforcing true
+ cooperation). Scored with the standard swarm multiplier.
+
+
+ 9j. INTERCEPTION MISSIONS
+ ──────────────────────────
+ When an enemy fleet is in transit to a neutral or enemy-owned
+ planet (not one of my planets), the agent checks if it can
+ arrive at that planet before the enemy fleet does. If yes, it
+ captures the planet first, then the enemy fleet crashes into
+ an owned garrison, wasting the enemy's ships.
+
+ Interception missions get a ×1.3 score bonus and add 2× the
+ enemy fleet's ship count to the mission value (reward for
+ destroying the fleet). The agent will only intercept if it
+ can arrive strictly before the enemy (not same turn).
+
+
+──────────────────────────────────────────────────────────────
+ 10. RL VALUE FUNCTION — MOVE RE-RANKING
+──────────────────────────────────────────────────────────────
+
+After each single-source capture plan is scored by the heuristic,
+the agent optionally re-ranks it using a neural network value
+function (OrbitsNet, trained on Kaggle replays and self-play).
+
+The process:
+  1. Simulate the board state 20 turns forward assuming the
+     fleet was launched (lightweight forward simulation).
+  2. Extract 30 features from the simulated state.
+  3. Feed features to the value function → win probability p.
+  4. RL boost = 0.35 × (p − 0.5)
+     (positive if the move predicts a win, negative if it
+     predicts a loss, centred at 0.5)
+  5. Multiply the heuristic value by (1 + rl_boost).
+
+This means the RL signal can increase or decrease a move's
+score by up to ±17.5%, nudging the agent towards positions
+that historically lead to wins in the replay data.
+
+The RL boost for a (source, target) pair is cached and reused
+for swarm scoring, so the value function's judgment propagates
+to multi-source missions without additional computation.
+
+
+──────────────────────────────────────────────────────────────
+ 11. FOLLOW-UP PHASE
+──────────────────────────────────────────────────────────────
+
+After the main mission queue is executed, any source with
+≥ 8 ships of attack budget remaining runs a secondary sweep:
+find the best-scoring capture it can make with leftover ships.
+This ensures no ships sit idle when there are available targets.
+
+The follow-up phase also re-runs the RL boost check on each
+candidate, so idle ships are directed toward RL-favoured targets.
+
+
+──────────────────────────────────────────────────────────────
+ 12. DOOMED EVACUATION
+──────────────────────────────────────────────────────────────
+
+If a planet is projected to fall within 24 turns and cannot
+be saved by any rescue mission, the agent declares it "doomed"
+and evacuates its ships rather than letting them die on the
+planet.
+
+Evacuation priority:
+  1. Find the best offensive capture reachable from the doomed
+     planet — use the ships to attack something useful.
+  2. If no attack is viable, retreat the ships to the closest
+     safe friendly planet that is not itself doomed.
+
+This prevents production planets from becoming ship traps.
+
+
+──────────────────────────────────────────────────────────────
+ 13. REAR STAGING — PIPELINE REPOSITIONING
+──────────────────────────────────────────────────────────────
+
+At the end of each turn, the agent looks for "rear" planets:
+friendly planets that are far from the front (measured by
+distance to nearest enemy or neutral planet) and have idle
+ships. It moves a fraction of their ships (62% in 1v1, 70%
+in FFA) forward to a "front" planet closer to the action.
+
+Purpose: ships produced on back-line planets are wasted if
+they never move. Staging pipelines them toward the fight
+without committing them to a specific target yet.
+
+Only active when not in very-late game and when the agent has
+more than one planet. Rear sources need ≥ 10 idle ships to
+trigger the move.
+
+
+──────────────────────────────────────────────────────────────
+ 14. OPENING FILTER — WHAT THE AGENT SKIPS EARLY
+──────────────────────────────────────────────────────────────
+
+During the opening phase the agent is selective about which
+neutrals it chases. It skips a rotating neutral if:
+
+  1v1: The travel time is too long (> 13 turns) OR the planet
+       has very low production (≤ 2) — not worth the ships.
+
+  FFA: The planet is affordable and arrives within 10 turns
+       with a reaction advantage ≥ 3 turns — let it be,
+       the agent will capture it anyway. This prevents FFA
+       games from opening with over-extension.
+
+  Both: High-production planets (≥ 4) that are reachable
+        within 10 turns with a 2-turn margin over enemies
+        are never filtered — always chase those early.
+
+
+──────────────────────────────────────────────────────────────
+ 15. TIME MANAGEMENT
+──────────────────────────────────────────────────────────────
+
+The agent runs within a hard wall-clock budget per turn.
+The soft deadline is set at 82% of the allowed action timeout.
+
+If time expires mid-computation:
+  - Phase 0 (mission building): heavy missions (sync swarm,
+    interception) are skipped when fewer than 32 planets are
+    visible or time is short.
+  - Phase 1 (single-source): returns immediately with moves
+    computed so far.
+  - Phase 2 (pair/trio swarm): skipped entirely.
+  - Trio swarms: individually time-checked per combination.
+  - EAM beam search: hard-capped at 0.8 seconds.
+
+The agent always returns whatever partial move list it has
+computed rather than timing out with an empty response.
+
+
+──────────────────────────────────────────────────────────────
+ 16. BALLISTICS — HOW FLEETS ACTUALLY AIM
+──────────────────────────────────────────────────────────────
+
+Fleet speed scales logarithmically with ship count:
+  speed = 1.0 + (6.0 − 1.0) × (log(ships) / log(1000))^1.5
+
+A fleet of 1 ship travels at speed 1.0.
+A fleet of 1000 ships travels at speed 6.0.
+Most attack fleets travel at speed 3-5 depending on size.
+
+Rotating planet targeting uses iterative convergence: the
+agent predicts where the planet will be at the estimated
+arrival time, re-estimates travel time, and repeats until
+the prediction converges (usually 3-5 iterations).
+
+Paths are checked for sun collision (centre of the map).
+If a direct path passes through the sun's danger zone, the
+shot is marked invalid and the agent skips or delays it.
+
+For comets (moving along pre-defined paths), the agent
+searches all valid intercept windows and picks the best
+one that avoids the sun and arrives before the comet expires.
+
+
+==============================================================
+ SUMMARY: DECISION PRIORITY ORDER EACH TURN
+==============================================================
+
+ 1.  Build world model, compute timelines, budgets
+ 2.  [1v1, turns 0-50] Try EAM beam-search opening
+ 3.  Assess strategic mode (behind / ahead / finishing)
+ 4.  Build reaction-time map for all non-owned planets
+ 5.  Build mission queue:
+       a. Reinforce (prevent falls proactively)
+       b. Rescue (imminent falls within 28 turns)
+       c. Recapture (post-fall takeback)
+       d. Total swarm (all-sources coordinated)
+       e. Sync swarm + interceptions (time permitting)
+       f. Single-source captures + snipes (Phase 1 main loop)
+       g. Pair swarms + trio swarms (Phase 2)
+       h. Crash exploits (FFA: enemy-on-enemy fights)
+ 6.  Sort all missions by score, execute in order
+ 7.  Follow-up sweep with remaining attack budget
+ 8.  Doomed evacuation
+ 9.  Rear staging pipeline
+10.  Return final move list within time budget
+
+==============================================================

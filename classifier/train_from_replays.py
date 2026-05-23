@@ -27,6 +27,10 @@ LEARNING_RATE       = 0.003
 AUC_MIN             = 0.58
 MAX_RECORDS_PER_CAT = 15000
 
+# TD trajectory parsing (separate from BCE snapshot cache)
+TD_SNAPSHOT_EVERY = 1   # every turn — dense transitions for offline TD
+TD_CACHE_FILE     = os.path.join(ROOT, "replay_td_cache.pkl")
+
 
 def extract_features(state, player, turn, n_hint=2, fleets=None):
     ms=mp=mpr=mc=ts=tpr=0.0; ed={}
@@ -330,6 +334,118 @@ def train_and_export(all_records, val_records=None):
     sz = os.path.getsize(VALUEFN) / 1024
     print(f"  Written -> {VALUEFN}  ({sz:.1f} KB)")
     return True
+
+
+def _parse_replay_td(rf):
+    """
+    Parse one replay JSON into per-player feature trajectories for offline TD.
+
+    Returns a list of dicts — one per player that survived long enough:
+        {'traj': [feats_0, feats_1, ..., feats_T],   # one feats list per step
+         'won':  0.0 | 1.0,
+         'n_agents': int}
+
+    Steps are sampled at TD_SNAPSHOT_EVERY (1 = every turn).
+    """
+    with open(rf, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    steps = data.get("steps", [])
+    if not steps:
+        return []
+
+    n_agents  = len(steps[0])
+    last_step = steps[-1]
+    rewards   = [a.get("reward", 0) or 0 for a in last_step]
+    max_r     = max(rewards)
+    winner    = -1 if (rewards.count(max_r) > 1 or max_r <= 0) else rewards.index(max_r)
+
+    trajectories = [[] for _ in range(n_agents)]
+
+    for step_idx, step_data in enumerate(steps):
+        if step_idx % TD_SNAPSHOT_EVERY != 0:
+            continue
+        obs = step_data[0].get("observation", {})
+        rp  = obs.get("planets", [])
+        ci  = set(obs.get("comet_planet_ids", []) or [])
+        rf_fleets = obs.get("fleets", []) or []
+        if not isinstance(rp, list) or not rp:
+            continue
+        sd = snap(rp, ci)
+        if not sd:
+            continue
+        for i in range(n_agents):
+            feats = extract_features(sd, i, step_idx, n_agents, fleets=rf_fleets)
+            trajectories[i].append(feats)
+
+    result = []
+    for i, traj in enumerate(trajectories):
+        if len(traj) < 2:
+            continue
+        won = 1.0 if i == winner else 0.0
+        result.append({"traj": traj, "won": won, "n_agents": n_agents})
+    return result
+
+
+def get_td_trajectories(replay_files=None):
+    """
+    Load per-player feature trajectories from replay files for offline TD training.
+
+    Uses a separate cache (TD_CACHE_FILE) so it doesn't interfere with the
+    existing BCE snapshot cache (replay_cache_v2.pkl).
+    Only training files (80% split) are used.
+
+    Returns list of {'traj': [feats, ...], 'won': float, 'n_agents': int}.
+    """
+    if replay_files is None:
+        train_files, _ = split_replay_files()
+        replay_files = train_files
+
+    cache = {}
+    if os.path.exists(TD_CACHE_FILE):
+        try:
+            with open(TD_CACHE_FILE, "rb") as f:
+                cache = pickle.load(f)
+        except Exception:
+            cache = {}
+
+    all_trajectories = []
+    cache_updated    = False
+    n_cached = n_fresh = 0
+
+    for i, rf in enumerate(replay_files):
+        cache_key = f"td|{rf}|{os.path.getmtime(rf):.0f}"
+        if cache_key in cache:
+            all_trajectories.extend(cache[cache_key])
+            n_cached += 1
+        else:
+            try:
+                trajs = _parse_replay_td(rf)
+                cache[cache_key] = trajs
+                all_trajectories.extend(trajs)
+                cache_updated = True
+                n_fresh += 1
+            except Exception as e:
+                print(f"  Error parsing TD {os.path.basename(rf)}: {e}")
+
+        if (i + 1) % 100 == 0 or (i + 1) == len(replay_files):
+            sys.stdout.write(
+                f"\r  TD parse {i+1}/{len(replay_files)}"
+                f"  (cached:{n_cached}  fresh:{n_fresh})   "
+            )
+            sys.stdout.flush()
+
+    print()
+
+    if cache_updated:
+        try:
+            with open(TD_CACHE_FILE, "wb") as f:
+                pickle.dump(cache, f)
+            sz = os.path.getsize(TD_CACHE_FILE) / 1024 / 1024
+            print(f"  TD cache saved -> {TD_CACHE_FILE}  ({sz:.1f} MB)")
+        except Exception as e:
+            print(f"  WARN: Could not save TD cache: {e}")
+
+    return all_trajectories
 
 
 def main():
