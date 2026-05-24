@@ -459,8 +459,8 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
         else:
             no_improve += 1
             tag = f"  (no improvement, best={best_wr:.1%}, streak={no_improve})"
-            if BEST_MODEL_PATH.exists():
-                load_ckpt(BEST_MODEL_PATH, model)
+            # We explicitly do NOT reload the best model here, as it traps the RL 
+            # agent in high-variance local minima and prevents exploration.
 
         print(f"\n  -> WR={wr:.1%}  avg_ppo_loss={avg_loss:.4f}  avg_ent={avg_entropy:.4f}{tag}")
         print(f"     intents: {intent_pct}")

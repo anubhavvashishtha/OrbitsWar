@@ -24,8 +24,15 @@ def main():
     print("  Creating Kaggle Submissions")
     print("=========================================\n")
     
-    # 1. Classifier Bot
-    create_zip("submission_classifier.zip", ["main.py", "value_fn.py"])
+    # 1. Classifier Bot (Hybrid 1v1 and 4v4 models)
+    create_zip("submission_classifier.zip", [
+        "main.py",
+        "classifier/__init__.py",
+        "classifier/value_fn_1v1.py",
+        "heuristic_4v4/__init__.py",
+        "heuristic_4v4/value_fn_4v4.py",
+        "heuristic_4v4/agent_4v4.py"
+    ])
     
     # 2. RL PPO Actor-Critic Bot
     create_zip("submission_rl.zip", ["main.py", "rl_value_fn.py"])

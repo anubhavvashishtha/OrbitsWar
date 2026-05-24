@@ -86,8 +86,7 @@ def run_evaluation(agent_name, value_fn_file, num_matches=20):
     print(f"Win/Tie Rate: {(wins+ties)/num_matches*100:.1f}%")
 
 if __name__ == "__main__":
-    # Test both agents for 20 matches each
-    run_evaluation("Classifier Agent", "value_fn_classifier.py", num_matches=20)
-    run_evaluation("TD Regressor Agent", "value_fn_regresoor.py", num_matches=20)
+    # Test the Dual-Brain Hybrid Agent (loads 1v1 and 4v4 models dynamically)
+    run_evaluation("Dual-Brain Hybrid Agent", "classifier/value_fn_1v1.py", num_matches=20)
     
     print("\nEvaluation Complete!")

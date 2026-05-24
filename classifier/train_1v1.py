@@ -26,7 +26,7 @@ ENEMY_DIR    = os.path.join(PROJECT_ROOT, "enemy agents")
 SIM_DIR      = os.path.join(PROJECT_ROOT, "simulation")
 DATA_DIR     = os.path.join(ROOT, "training_data")
 RECORDS_DIR  = os.path.join(PROJECT_ROOT, "records")
-VALUEFN      = os.path.join(PROJECT_ROOT, "value_fn.py")
+VALUEFN      = os.path.join(ROOT, "value_fn_1v1.py")
 RESULTS_LOG  = os.path.join(ROOT, "training_log.json")
 
 for _d in (ENEMY_DIR, SIM_DIR, DATA_DIR):
@@ -426,17 +426,19 @@ def main():
         try:
             if ROOT not in sys.path:
                 sys.path.insert(0, ROOT)
-            from train_from_replays import get_balanced_replay_records
+            clf_dir = os.path.join(ROOT, "classifier")
+            if clf_dir not in sys.path:
+                sys.path.insert(0, clf_dir)
             from train_from_replays import get_balanced_replay_records, get_val_records
             replay_records = get_balanced_replay_records(max_per_cat=10000)
             val_records    = get_val_records(max_per_cat=5000)
             print(f"  Loaded {len(replay_records)} training + {len(val_records)} held-out val records.")
             if not os.path.exists(VALUEFN):
-                print("  No value_fn.py found -- running replay pretraining...")
+                print("  No value_fn_1v1.py found -- running replay pretraining...")
                 train_and_export(replay_records, val_records=val_records)
                 print("  Pretraining complete.")
             else:
-                print("  value_fn.py exists -- replay records will mix in each round.")
+                print("  value_fn_1v1.py exists -- replay records will mix in each round.")
         except Exception as e:
             print(f"  WARN: Replay load failed: {e}")
     else:
@@ -544,10 +546,10 @@ def main():
     if history:
         print(f"  Final 1v1 win rate: {history[-1][1]:.1%}  "
               f"(after round {history[-1][0]})")
-    print(f"  value_fn.py  : {VALUEFN}")
-    print(f"  Training data: {DATA_DIR}/")
-    print(f"  Training log : {RESULTS_LOG}")
-    print(f"\n  To submit: zip submission.zip main.py value_fn.py")
+    print(f"  value_fn_1v1.py: {VALUEFN}")
+    print(f"  Training data  : {DATA_DIR}/")
+    print(f"  Training log   : {RESULTS_LOG}")
+    print(f"\n  To submit: python submission_script.py  (packages both 1v1 and 4v4 models)")
     print(f"{'='*65}")
 
 

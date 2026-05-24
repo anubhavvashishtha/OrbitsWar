@@ -21,20 +21,54 @@ import time
 from collections import defaultdict, namedtuple
 from dataclasses import dataclass, field
 
-# ── RL Value Function Layer (from main(2).py) ───────────────────────────────
-GLOBAL_TREES=[]; GLOBAL_INIT=0.0; GLOBAL_N_TREES=0
-EARLY_TREES =[];  EARLY_INIT=0.0;  EARLY_N_TREES=0
-LATE_TREES  =[];   LATE_INIT=0.0;   LATE_N_TREES=0
-VALUE_FN_LOADED=False
+# ── RL Dual-Brain Value Function Layer (1v1 & 4v4) ───────────────────────────
+# 1v1 Model Globals
+GLOBAL_TREES_1v1 = []; GLOBAL_INIT_1v1 = 0.0; GLOBAL_N_TREES_1v1 = 0
+EARLY_TREES_1v1  = []; EARLY_INIT_1v1  = 0.0; EARLY_N_TREES_1v1  = 0
+LATE_TREES_1v1   = []; LATE_INIT_1v1   = 0.0; LATE_N_TREES_1v1   = 0
+VALUE_FN_1V1_LOADED = False
 
+# 4v4 Model Globals
+GLOBAL_TREES_4v4 = []; GLOBAL_INIT_4v4 = 0.0; GLOBAL_N_TREES_4v4 = 0
+EARLY_TREES_4v4  = []; EARLY_INIT_4v4  = 0.0; EARLY_N_TREES_4v4  = 0
+LATE_TREES_4v4   = []; LATE_INIT_4v4   = 0.0; LATE_N_TREES_4v4   = 0
+VALUE_FN_4V4_LOADED = False
+
+# Load 1v1 weights
 try:
-    from old import GLOBAL_TREES,GLOBAL_INIT,GLOBAL_N_TREES,VALUE_FN_LOADED
-    try: from old import EARLY_TREES,EARLY_INIT,EARLY_N_TREES
+    from value_fn_1v1 import GLOBAL_TREES as GLOBAL_TREES_1v1, GLOBAL_INIT as GLOBAL_INIT_1v1, GLOBAL_N_TREES as GLOBAL_N_TREES_1v1, VALUE_FN_LOADED as VALUE_FN_1V1_LOADED
+    try: from value_fn_1v1 import EARLY_TREES as EARLY_TREES_1v1, EARLY_INIT as EARLY_INIT_1v1, EARLY_N_TREES as EARLY_N_TREES_1v1
     except ImportError: pass
-    try: from old import LATE_TREES,LATE_INIT,LATE_N_TREES
+    try: from value_fn_1v1 import LATE_TREES as LATE_TREES_1v1, LATE_INIT as LATE_INIT_1v1, LATE_N_TREES as LATE_N_TREES_1v1
     except ImportError: pass
 except ImportError:
-    pass
+    # Kaggle fallback (if dataset uploaded as old)
+    try:
+        from old import GLOBAL_TREES as GLOBAL_TREES_1v1, GLOBAL_INIT as GLOBAL_INIT_1v1, GLOBAL_N_TREES as GLOBAL_N_TREES_1v1, VALUE_FN_LOADED as VALUE_FN_1V1_LOADED
+        try: from old import EARLY_TREES as EARLY_TREES_1v1, EARLY_INIT as EARLY_INIT_1v1, EARLY_N_TREES as EARLY_N_TREES_1v1
+        except ImportError: pass
+        try: from old import LATE_TREES as LATE_TREES_1v1, LATE_INIT as LATE_INIT_1v1, LATE_N_TREES as LATE_N_TREES_1v1
+        except ImportError: pass
+    except ImportError:
+        pass
+
+# Load 4v4 weights
+try:
+    from value_fn_4v4 import GLOBAL_TREES as GLOBAL_TREES_4v4, GLOBAL_INIT as GLOBAL_INIT_4v4, GLOBAL_N_TREES as GLOBAL_N_TREES_4v4, VALUE_FN_4V4_LOADED
+    try: from value_fn_4v4 import EARLY_TREES as EARLY_TREES_4v4, EARLY_INIT as EARLY_INIT_4v4, EARLY_N_TREES as EARLY_N_TREES_4v4
+    except ImportError: pass
+    try: from value_fn_4v4 import LATE_TREES as LATE_TREES_4v4, LATE_INIT as LATE_INIT_4v4, LATE_N_TREES as LATE_N_TREES_4v4
+    except ImportError: pass
+except ImportError:
+    # Kaggle fallback
+    try:
+        from old_4v4 import GLOBAL_TREES as GLOBAL_TREES_4v4, GLOBAL_INIT as GLOBAL_INIT_4v4, GLOBAL_N_TREES as GLOBAL_N_TREES_4v4, VALUE_FN_4V4_LOADED
+        try: from old_4v4 import EARLY_TREES as EARLY_TREES_4v4, EARLY_INIT as EARLY_INIT_4v4, EARLY_N_TREES as EARLY_N_TREES_4v4
+        except ImportError: pass
+        try: from old_4v4 import LATE_TREES as LATE_TREES_4v4, LATE_INIT as LATE_INIT_4v4, LATE_N_TREES as LATE_N_TREES_4v4
+        except ImportError: pass
+    except ImportError:
+        pass
 
 def _walk(trees, init, feats):
     z = init
@@ -48,14 +82,24 @@ def _walk(trees, init, feats):
 def _sig(z):
     return 1.0/(1.0+math.exp(-z)) if z >= 0 else math.exp(z)/(1.0+math.exp(z))
 
-def value_score(feats, turn=250):
-    if not VALUE_FN_LOADED: return None
-    if turn <= 100 and EARLY_N_TREES > 0:
-        return _sig(_walk(EARLY_TREES, EARLY_INIT, feats))
-    if turn >= 300 and LATE_N_TREES > 0:
-        return _sig(_walk(LATE_TREES, LATE_INIT, feats))
-    if GLOBAL_N_TREES > 0:
-        return _sig(_walk(GLOBAL_TREES, GLOBAL_INIT, feats))
+def value_score_1v1(feats, turn=250):
+    if not VALUE_FN_1V1_LOADED: return None
+    if turn <= 100 and EARLY_N_TREES_1v1 > 0:
+        return _sig(_walk(EARLY_TREES_1v1, EARLY_INIT_1v1, feats))
+    if turn >= 300 and LATE_N_TREES_1v1 > 0:
+        return _sig(_walk(LATE_TREES_1v1, LATE_INIT_1v1, feats))
+    if GLOBAL_N_TREES_1v1 > 0:
+        return _sig(_walk(GLOBAL_TREES_1v1, GLOBAL_INIT_1v1, feats))
+    return None
+
+def value_score_4v4(feats, turn=250):
+    if not VALUE_FN_4V4_LOADED: return None
+    if turn <= 100 and EARLY_N_TREES_4v4 > 0:
+        return _sig(_walk(EARLY_TREES_4v4, EARLY_INIT_4v4, feats))
+    if turn >= 300 and LATE_N_TREES_4v4 > 0:
+        return _sig(_walk(LATE_TREES_4v4, LATE_INIT_4v4, feats))
+    if GLOBAL_N_TREES_4v4 > 0:
+        return _sig(_walk(GLOBAL_TREES_4v4, GLOBAL_INIT_4v4, feats))
     return None
 
 # ── NamedTuples ────────────────────────────────────────────────────────────
@@ -2066,12 +2110,18 @@ def plan_moves(world, deadline=None):
                     continue
 
                 # RL ENHANCEMENT: Re-rank with value function when available
-                if VALUE_FN_LOADED:
+                is_1v1 = (world.num_players == 2)
+                if (is_1v1 and VALUE_FN_1V1_LOADED) or (not is_1v1 and VALUE_FN_4V4_LOADED):
                     raw_p = [[p.id, p.owner, p.x, p.y, p.radius, p.ships, p.production] for p in world.planets]
                     raw_f = [[f.id, f.owner, f.x, f.y, f.angle, f.from_planet_id, f.ships] for f in world.fleets]
                     sim = _sim_move(raw_p, raw_f, world.player, src.id, angle, send_cap)
-                    feats = _extract_features(sim, world.player, world.step, fleets_raw=raw_f)
-                    pw = value_score(feats, world.step)
+                    if is_1v1:
+                        feats = _extract_features(sim, world.player, world.step, fleets_raw=raw_f)
+                        pw = value_score_1v1(feats, world.step)
+                    else:
+                        sim_dicts = [{'id':p[0],'owner':p[1],'x':p[2],'y':p[3],'radius':p[4],'ships':p[5],'production':p[6]} for p in sim]
+                        feats_4v4 = extract_features_4v4(sim_dicts, world.player, world.step, n_hint=world.num_players, fleets=raw_f)
+                        pw = value_score_4v4(feats_4v4, world.step)
                     if pw is not None:
                         rl_boost = 0.35 * (pw - 0.5)
                         rl_boost_map[(src.id, target.id)] = rl_boost
@@ -2321,12 +2371,18 @@ def plan_moves(world, deadline=None):
                     continue
 
                 # RL re-ranking for follow-up too
-                if VALUE_FN_LOADED:
+                is_1v1 = (world.num_players == 2)
+                if (is_1v1 and VALUE_FN_1V1_LOADED) or (not is_1v1 and VALUE_FN_4V4_LOADED):
                     raw_p = [[p.id, p.owner, p.x, p.y, p.radius, p.ships, p.production] for p in world.planets]
                     raw_f = [[f.id, f.owner, f.x, f.y, f.angle, f.from_planet_id, f.ships] for f in world.fleets]
                     sim = _sim_move(raw_p, raw_f, world.player, src.id, plan[0], final_send)
-                    feats = _extract_features(sim, world.player, world.step, fleets_raw=raw_f)
-                    pw = value_score(feats, world.step)
+                    if is_1v1:
+                        feats = _extract_features(sim, world.player, world.step, fleets_raw=raw_f)
+                        pw = value_score_1v1(feats, world.step)
+                    else:
+                        sim_dicts = [{'id':p[0],'owner':p[1],'x':p[2],'y':p[3],'radius':p[4],'ships':p[5],'production':p[6]} for p in sim]
+                        feats_4v4 = extract_features_4v4(sim_dicts, world.player, world.step, n_hint=world.num_players, fleets=raw_f)
+                        pw = value_score_4v4(feats_4v4, world.step)
                     if pw is not None:
                         rl_boost = 0.35 * (pw - 0.5)
                         value *= (1.0 + rl_boost)
@@ -2833,7 +2889,49 @@ def build_world(obs):
         comet_ids=comet_ids,
     )
 
+# Keep a singleton instance of the 4v4 agent to preserve turn-based state (e.g. self._targeted, self.last_turn_owner, etc.)
+_agent_4v4_instance = None
+
 def agent(obs, config=None):
+    global _agent_4v4_instance
+    
+    # 1. Mode check: extract player and match info
+    player = obs.player if hasattr(obs, "player") else obs.get("player", 0)
+    raw_p  = obs.planets if hasattr(obs, "planets") else obs.get("planets", [])
+    raw_f  = obs.fleets if hasattr(obs, "fleets") else obs.get("fleets", [])
+    
+    # Count players
+    unique_players = set()
+    for p in raw_p:
+        if p[1] != -1:
+            unique_players.add(p[1])
+    for f in raw_f:
+        if f[1] != -1:
+            unique_players.add(f[1])
+    num_players = max(2, len(unique_players))
+    
+    # 2. If it's a 4-player game (FFA), delegate to the 4v4 heuristic agent with value function verification
+    if num_players > 2:
+        if _agent_4v4_instance is None:
+            try:
+                import agent_4v4
+                _agent_4v4_instance = agent_4v4.agent_instance
+            except Exception as e:
+                # print(f"Error loading agent_4v4: {e}")
+                pass
+        if _agent_4v4_instance is not None:
+            value_fns = {
+                'VALUE_FN_4V4_LOADED': VALUE_FN_4V4_LOADED,
+                'value_score_4v4': value_score_4v4,
+                'extract_features_4v4': extract_features_4v4
+            }
+            try:
+                return _agent_4v4_instance(obs, config, value_fns=value_fns)
+            except Exception as e:
+                # print(f"Error running agent_4v4: {e}, falling back to default planner")
+                pass
+
+    # 3. Otherwise (1v1 or fallback), run default main.py planning (beam search, swarm attacks, 1v1 GBC)
     start_time = time.perf_counter()
     world = build_world(obs)
     if not world.my_planets:
@@ -2850,3 +2948,122 @@ def agent(obs, config=None):
     return plan_moves(world, deadline=deadline)
 
 __all__ = ["agent", "build_world"]
+def extract_features_4v4(state, player, turn, n_hint=2, fleets=None):
+    ms=mp=mpr=mc=ts=tpr=0.0; ed={}
+    msl=[]; mprl=[]; mpos=[]; epos=[]
+    
+    my_static_ships = 0.0
+    enemy_static_ships = 0.0
+    my_tanks = 0
+    enemy_tanks = 0
+    my_quad_prod = [0.0]*4
+    my_quad_ships = [0.0]*4
+    my_inner = 0.0
+    my_outer = 0.0
+    
+    for s in state:
+        sh=max(0.0,float(s.get('ships',0))); ts+=sh
+        ow=s.get('owner',-1)
+        if ow==-1: continue
+        pr=float(s.get('production',0)); tpr+=pr
+        px=float(s.get('x',50)); py=float(s.get('y',50))
+        dist_c = ( (px-50)**2 + (py-50)**2 )**0.5
+        cn=max(0.0,60.0-dist_c)
+        
+        qx=px-50; qy=py-50
+        qidx = 0 if qx>=0 and qy>=0 else 1 if qx<0 and qy>=0 else 2 if qx<0 and qy<0 else 3
+        is_stat = (dist_c >= 40.0)
+        is_tank = (pr >= 3.0)
+        
+        if ow==player:
+            ms+=sh; mp+=1; mpr+=pr; mc+=cn
+            msl.append(sh); mprl.append(pr); mpos.append((px,py))
+            if is_stat: my_static_ships += sh
+            if is_tank: my_tanks += 1
+            my_quad_prod[qidx] += pr; my_quad_ships[qidx] += sh
+            if dist_c < 25: my_inner += sh
+            else: my_outer += sh
+        else:
+            e=ed.setdefault(ow,{'s':0.,'p':0,'pr':0.,'c':0.,'sl':[],'prl':[]})
+            e['s']+=sh; e['p']+=1; e['pr']+=pr; e['c']+=cn
+            e['sl'].append(sh); e['prl'].append(pr); epos.append((px,py))
+            if is_stat: enemy_static_ships += sh
+            if is_tank: enemy_tanks += 1
+
+    cx, cy = 50.0, 50.0
+    if mpos: cx=sum(x for x,y in mpos)/len(mpos); cy=sum(y for x,y in mpos)/len(mpos)
+
+    bes=bep=bepr=bec=0.0; best_ow=None
+    if ed:
+        best_ow,be=max(ed.items(),key=lambda kv:kv[1]['s']+100*kv[1]['p'])
+        bes=be['s']; bep=float(be['p']); bepr=be['pr']; bec=be['c']/max(1,be['p'])
+        
+    tp=max(1,len(state)); sf=lambda a,b:a/b if b>1e-9 else 0.0
+    np2=max(2,1+len(ed),n_hint)
+    
+    my_max_sh=max(msl) if msl else 0.0
+    be_sl=ed[best_ow]['sl'] if best_ow else []
+    enemy_max_sh=max(be_sl) if be_sl else 0.0
+    neutral_cnt=sum(1 for s in state if s.get('owner',-1)==-1)
+    my_top3_pr=sum(sorted(mprl,reverse=True)[:3]) if mprl else 0.0
+    be_prl=ed[best_ow]['prl'] if best_ow else []
+    enemy_top3_pr=sum(sorted(be_prl,reverse=True)[:3]) if be_prl else 0.0
+    min_edist=1.0
+    if mpos and epos:
+        min_edist=min(((mx-ex)**2+(my-ey)**2)**0.5 for mx,my in mpos for ex,ey in epos)/100.0
+
+    mfs=efs=0.0; mfc=efc=0
+    in_att = {}; my_tgt = 0.0; my_off = 0.0; en_tgt = 0.0
+    pid2ow = {s.get('id',-1): s.get('owner',-1) for s in state}
+    pid2pos = {s.get('id',-1): (float(s.get('x',50)),float(s.get('y',50))) for s in state}
+    att_dists = []
+    
+    for f in (fleets or []):
+        fow=f[1] if isinstance(f,(list,tuple)) else f.get('owner',-1)
+        fsh=float(f[6] if isinstance(f,(list,tuple)) else f.get('ships',0))
+        tid = f[5] if isinstance(f,(list,tuple)) and len(f)>5 else f.get('target_id',-1)
+        
+        if fow==player: 
+            mfs+=fsh; mfc+=1
+            if tid!=-1 and pid2ow.get(tid,-1)!=player: my_off+=fsh
+        elif fow!=-1:   
+            efs+=fsh; efc+=1
+            if tid!=-1:
+                tow = pid2ow.get(tid,-1)
+                if tow==player:
+                    my_tgt+=fsh
+                    px,py = pid2pos.get(tid,(50,50))
+                    att_dists.append(((px-cx)**2+(py-cy)**2)**0.5)
+                else:
+                    if tow!=-1 and tow!=player: en_tgt+=fsh
+                    if tid not in in_att: in_att[tid]=[]
+                    in_att[tid].append((fow,fsh))
+                    
+    ta=ts+mfs+efs+1.0
+    
+    eve_conf = 0; eve_sh = 0.0
+    for tid, atts in in_att.items():
+        uniq = set(a[0] for a in atts)
+        if len(uniq)>=2:
+            eve_conf+=1; eve_sh+=sum(a[1] for a in atts)
+            
+    my_home_prod = max(my_quad_prod) if my_quad_prod else 0.0
+    quad_dom = sf(max(my_quad_ships) if my_quad_ships else 0.0, ms)
+    avg_att_dist = (sum(att_dists)/len(att_dists)/100.0) if att_dists else 0.0
+
+    return [
+        turn/500.0, np2/4.0, sf(mp,tp), sf(bep,tp), sf(ms,ts), sf(bes,ts),
+        sf(mpr,tpr), sf(bepr,tpr), (mc/max(1,mp))/60.0, bec/60.0,
+        sf(ms-bes,ts+1), sf(mp-bep,tp), sf(mpr-bepr,tpr+1),
+        1.0 if np2==2 else 0.0, 1.0 if np2==4 else 0.0, sf(ms,bes+1),
+        my_max_sh/max(1.0,ts), enemy_max_sh/max(1.0,ts), neutral_cnt/tp,
+        sf(my_top3_pr,tpr), sf(enemy_top3_pr,tpr), min(1.0,min_edist),
+        sf(mfs,ta), sf(efs,ta), min(1.0,mfc/8.0), min(1.0,efc/8.0),
+        sf(mfs,ms+1.0), sf(efs,bes+1.0), sf(mpr,mp*5.0+1.0), min(1.0,(turn/500.0)*sf(ms,ts+1.0)),
+        sf(my_static_ships, ts), sf(enemy_static_ships, ts), my_tanks/max(1.0,tp), enemy_tanks/max(1.0,tp),
+        sf(my_tgt, ms+1.0), sf(my_off, ms+1.0), eve_conf/10.0, sf(eve_sh, ts),
+        sf(my_home_prod, tpr), quad_dom, avg_att_dist, sf(my_inner, ms), sf(my_outer, ms), sf(en_tgt, ts)
+    ]
+
+
+
