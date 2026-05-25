@@ -1,13 +1,39 @@
 # ===================================================================
-# train_from_replays.py
+# heuristic_4v4/train_4v4.py
 #
-# Parses Kaggle JSON replays in the 'records' folder, extracts
-# features, and trains the value_fn_regresoor.py model.
+# WHAT IT DOES
+# ------------
+# Same pipeline as classifier/train_from_replays.py but for 4-player
+# FFA games only. Trains a 4v4-specific GBC on 44-dim features.
 #
-# Features:
-#   - Learns from ANY agent in the replay (not just yours)
-#   - Balances data perfectly: 1v1 wins, 1v1 losses, 4p wins, 4p losses
-#   - get_balanced_replay_records() is importable by train.py / ffa_train.py
+# LABEL LOGIC (binary: won=1 / lost=0)
+# -------------------------------------
+# Same as 1v1 classifier — every snapshot in a won game gets label 1,
+# every snapshot in a lost game gets label 0.
+# In FFA (4 players) only ONE player wins; the other 3 all get label 0.
+# So the dataset is naturally imbalanced 1:3 (win:loss) — oversampling
+# corrects this before training.
+#
+# OUTPUT
+# ------
+# Writes heuristic_4v4/value_fn_4v4.py  (GLOBAL/EARLY/MID/LATE trees)
+# Returns True on success, False if not enough data or AUC too low.
+#
+# DATA FLOW
+# ---------
+# records/*.json  →  parse_replays()  →  extract_features_4v4() per step
+#     →  balance win/loss counts  →  train GBC  →  value_fn_4v4.py
+#
+# No bot games are played here — purely offline on saved replay files.
+#
+# KEY FUNCTIONS (importable)
+# --------------------------
+# extract_features_4v4(state, player, turn, n_hint, fleets) → 44-dim list
+# snap(raw_p, comet_ids)                                     → state dicts
+# split_replay_files()                                       → (train, val)
+# get_balanced_replay_records()                              → records list
+# get_val_records()                                          → val records
+# train_and_export(records, val_records)         → True/False
 # ===================================================================
 
 import os, sys, glob, json, math, random, pickle
@@ -24,7 +50,6 @@ MIN_SAMPLES         = 500
 N_ESTIMATORS        = 600
 MAX_DEPTH           = 5
 LEARNING_RATE       = 0.003
-Bronze_AUC_MIN      = 0.58
 AUC_MIN             = 0.58
 MAX_RECORDS_PER_CAT = 9999999
 

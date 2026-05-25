@@ -1,18 +1,56 @@
 """
 regressor/train_from_replays.py
 ================================
-Train a 1v1 GradientBoostingRegressor on TD-discounted returns from Kaggle replays.
+WHAT IT DOES
+------------
+Reads saved Kaggle replay JSON files from records/*.json,
+extracts a feature snapshot at EVERY turn (TD_SNAPSHOT_EVERY=1),
+and trains a GradientBoostingRegressor (GBR) on TD-discounted returns.
 
-Unlike the classifier (all steps in a won game get label 1), the regressor
-computes a discounted return per step:
-    dominating at turn 480  ->  V ~ 0.97
-    ahead at turn 200       ->  V ~ 0.60
-    neutral at turn 100     ->  V ~ 0.50
-    behind at turn 200      ->  V ~ 0.40
-    dominating loss t=480   ->  V ~ 0.03
+LABEL LOGIC (continuous: V in [0, 1])
+--------------------------------------
+Unlike the classifier which labels the whole game 0 or 1,
+the regressor computes a per-step value via backward TD pass:
 
-Targets are logit-transformed so _sig() in main.py converts them back to [0,1]
-at inference — no changes to main.py required.
+    V(s_T)   = won          (1.0 if you won, 0.0 if you lost)
+    V(s_t)   = shaped_r + gamma * V(s_{t+1})
+
+    shaped_r = reward_scale * (
+        0.4 * Δship_share  +
+        0.4 * Δprod_share  +
+        0.2 * Δplanet_share
+    )
+
+Result:
+    dominating at turn 480  →  V ≈ 0.97   (nearly certain win)
+    ahead at turn 200       →  V ≈ 0.60   (moderate advantage)
+    neutral at turn 100     →  V ≈ 0.50   (coin flip)
+    behind at turn 200      →  V ≈ 0.40   (moderate deficit)
+    losing at turn 480      →  V ≈ 0.03   (nearly certain loss)
+
+Targets are logit-transformed before fitting so _sig() in main.py
+converts raw tree output back to [0,1] — same inference code as classifier.
+
+OUTPUT
+------
+Writes regressor/value_fn_1v1.py  (GLOBAL trees only, no EARLY/LATE/MID split)
+Returns True on success, False if not enough data.
+
+DATA FLOW
+---------
+records/*.json  →  _parse_replay_td()  →  extract_features() every step
+    →  _compute_td_values() backward pass  →  fit GBR on logit(V)
+    →  value_fn_1v1.py
+
+No bot games are played here — purely offline on saved replay files.
+Fine-tune vs bots: python regressor/train_vs_bots.py
+
+KEY FUNCTIONS (importable by train_vs_bots.py)
+----------------------------------------------
+get_td_trajectories()              → list of {traj, won, n_agents}
+get_val_trajectories()             → val split of same
+train_and_export(trajectories, val_trajectories, gamma, reward_scale)
+                                   → True/False, writes value_fn_1v1.py
 
 Usage
 -----

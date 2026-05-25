@@ -28,6 +28,16 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "classifier"))
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# Load get_td_trajectories from regressor/ explicitly to avoid collision with
+# classifier/train_from_replays.py (same filename, different module)
+import importlib.util as _ilu
+_reg_spec = _ilu.spec_from_file_location(
+    "_reg_train_from_replays",
+    str(PROJECT_ROOT / "regressor" / "train_from_replays.py"))
+_reg_mod = _ilu.module_from_spec(_reg_spec)
+_reg_spec.loader.exec_module(_reg_mod)
+get_td_trajectories = _reg_mod.get_td_trajectories
+
 try:
     import torch
     import torch.nn as nn
@@ -85,8 +95,6 @@ def train_replay_td(model, n_epochs: int = TD_EPOCHS, gamma: float = GAMMA):
     The value function slowly learns the temporal structure of the game —
     something BCE training on independent snapshots can never see.
     """
-    from train_from_replays import get_td_trajectories
-
     print("\n" + "=" * 55)
     print("  Phase B — Offline TD on replay trajectories")
     print("=" * 55)
@@ -270,7 +278,7 @@ def train(resume: bool = False, skip_td: bool = False):
                 if vl < best_val:
                     best_val = vl
                     torch.save(model.state_dict(), MODEL_PATH)
-                    tag += " ✓"
+                    tag += " *"
             print(f"  Epoch {epoch:3d}/{N_EPOCHS}  "
                   f"train_loss={total_loss/len(X_train):.4f}{tag}")
 

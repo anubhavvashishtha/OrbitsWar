@@ -1,13 +1,40 @@
 # ===================================================================
-# train_from_replays.py
+# classifier/train_from_replays.py
 #
-# Parses Kaggle JSON replays in the 'records' folder, extracts
-# features, and trains the value_fn.py model.
+# WHAT IT DOES
+# ------------
+# Reads saved Kaggle replay JSON files from records/*.json,
+# extracts a feature snapshot every SNAPSHOT_EVERY=5 turns,
+# and trains a GradientBoostingClassifier (GBC) on binary labels.
 #
-# Features:
-#   - Learns from ANY agent in the replay (not just yours)
-#   - Balances data perfectly: 1v1 wins, 1v1 losses, 4p wins, 4p losses
-#   - get_balanced_replay_records() is importable by train.py / ffa_train.py
+# LABEL LOGIC (binary: won=1 / lost=0)
+# -------------------------------------
+# Every snapshot in a game that player i WON  → label 1
+# Every snapshot in a game that player i LOST → label 0
+# Ties → ignored (winner=-1 means no label assigned)
+# Result: the model learns "what does a winning position look like"
+# but has NO sense of how big or certain the advantage is.
+#
+# OUTPUT
+# ------
+# Writes classifier/value_fn_1v1.py  (GLOBAL/EARLY/MID/LATE trees)
+# Returns True on success, False if not enough data or AUC too low.
+#
+# DATA FLOW
+# ---------
+# records/*.json  →  parse_replays()  →  extract_features() per step
+#     →  balance win/loss counts  →  train GBC  →  value_fn_1v1.py
+#
+# No bot games are played here — purely offline on saved replay files.
+#
+# KEY FUNCTIONS (importable)
+# --------------------------
+# extract_features(state, player, turn, n_hint, fleets) → 30-dim list
+# snap(raw_p, comet_ids)                                → state dicts
+# split_replay_files()                                  → (train, val) paths
+# get_balanced_replay_records()                         → records list
+# get_val_records()                                     → val records list
+# train_and_export(records, val_records)    → True/False
 # ===================================================================
 
 import os, sys, glob, json, math, random, pickle

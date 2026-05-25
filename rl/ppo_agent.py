@@ -31,7 +31,7 @@ def main():
                    help="Skip Phase 1 (replay pretraining), use existing model.pt")
     p.add_argument("--resume",       action="store_true",
                    help="Resume replay pretraining from existing model.pt")
-    p.add_argument("--rounds",       type=int, default=10,
+    p.add_argument("--rounds",       type=int, default=50,
                    help="Self-play training rounds (Phase 2)")
     p.add_argument("--games",        type=int, default=8,
                    help="Games per round (Phase 2)")

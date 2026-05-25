@@ -1,7 +1,47 @@
 """
 regressor_4v4/train_from_replays.py
 =====================================
-Train a 4v4 GradientBoostingRegressor on TD-discounted returns from Kaggle replays.
+WHAT IT DOES
+------------
+Same pipeline as regressor/train_from_replays.py but for 4-player FFA only.
+Uses 44-dim features from extract_features_4v4() instead of 30-dim 1v1 features.
+
+LABEL LOGIC (continuous: V in [0, 1])
+--------------------------------------
+Backward TD pass through each player's trajectory:
+
+    V(s_T)   = won          (1.0 if you won, 0.0 if you lost/tied)
+    V(s_t)   = shaped_r + gamma * V(s_{t+1})
+
+In FFA (4 players), only ONE player wins so won=1.0 is rare.
+The shaped reward Δships/Δprod/Δplanet nudges mid-game values:
+
+    dominating at turn 480  →  V ≈ 0.97
+    neutral at turn 100     →  V ≈ 0.25   (4-player baseline is ~0.25, not 0.5)
+    losing at turn 480      →  V ≈ 0.03
+
+Targets are logit-transformed before fitting — same _sig() inference as classifier.
+
+OUTPUT
+------
+Writes regressor_4v4/value_fn_4v4.py  (GLOBAL trees only)
+Returns True on success, False if not enough data.
+
+DATA FLOW
+---------
+records/*.json  →  _parse_replay_td()  →  extract_features_4v4() every step
+    →  _compute_td_values() backward pass  →  fit GBR on logit(V)
+    →  value_fn_4v4.py
+
+No bot games are played here — purely offline on saved replay files.
+Fine-tune vs bots: python regressor_4v4/train_vs_bots.py
+
+KEY FUNCTIONS (importable by train_vs_bots.py)
+----------------------------------------------
+get_td_trajectories()              → list of {traj, won, n_agents}
+get_val_trajectories()             → val split of same
+train_and_export(trajectories, val_trajectories, gamma, reward_scale)
+                                   → True/False, writes value_fn_4v4.py
 
 Usage
 -----
