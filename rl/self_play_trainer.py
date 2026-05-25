@@ -64,7 +64,7 @@ GAMMA           = 0.99
 GAE_LAMBDA      = 0.95
 CLIP_EPS        = 0.2
 VAL_COEF        = 0.5
-ENT_COEF        = 0.01
+ENT_COEF        = 0.05
 PPO_EPOCHS      = 4
 BATCH_SIZE      = 256
 SNAPSHOT_EVERY  = 1      # capture every turn (TODO #4 — dense transitions)
@@ -350,10 +350,11 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
     best_wr = 0.0
     start_rnd = 1
 
-    if MODEL_PATH.exists():
+    load_from = BEST_MODEL_PATH if BEST_MODEL_PATH.exists() else MODEL_PATH
+    if load_from.exists():
         try:
-            best_wr, start_rnd = load_ckpt(MODEL_PATH, model)
-            print(f"Loaded model from {MODEL_PATH} (Epoch {start_rnd}, Best WR: {best_wr:.1%})")
+            best_wr, start_rnd = load_ckpt(load_from, model)
+            print(f"Loaded model from {load_from} (Epoch {start_rnd}, Best WR: {best_wr:.1%})")
         except Exception as e:
             print(f"Architecture mismatch ({e}) — starting from random weights.")
     else:
@@ -372,14 +373,20 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
 
     my_fn, my_name = load_agent(str(MAIN_PY), force=True)
 
+    _std_paths = [p for p in glob.glob(str(ENEMY_DIR / "*" / "main.py"))
+                  if Path(p).parent.name != "my"]
+    _my_paths  = [p for p in glob.glob(str(ENEMY_DIR / "my" / "*.py"))
+                  if not Path(p).name.startswith("__")]
     enemies = []
-    for ef in sorted(glob.glob(str(ENEMY_DIR / "*.py"))):
+    for ef in sorted(_std_paths + _my_paths):
+        p    = Path(ef)
+        label = p.stem if p.parent.name == "my" else p.parent.name
         try:
             fn, name = load_agent(ef)
-            enemies.append((name, fn))
-            print(f"  Loaded enemy: {name}")
+            enemies.append((label, fn))
+            print(f"  Loaded enemy: {label}")
         except Exception as e:
-            print(f"  WARN {Path(ef).name}: {e}")
+            print(f"  WARN {label}: {e}")
 
     if not enemies:
         print(f"No enemy agents found in {ENEMY_DIR}"); return
@@ -389,8 +396,9 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
     print("=" * 60)
 
     no_improve = 0
+    rnd = start_rnd - 1  # guard: defined even if loop body never executes
 
-    for rnd in range(start_rnd, n_rounds + 1):
+    for rnd in range(start_rnd, start_rnd + n_rounds):
         wins = losses = draws = 0
         round_loss = 0.0
         round_entropy = 0.0

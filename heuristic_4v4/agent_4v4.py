@@ -167,11 +167,11 @@ class TacticalQuadrantAgent:
         # Value functions for veto harness
         VALUE_FN_4V4_LOADED = False
         value_score_4v4 = None
-        extract_features_4v4 = None
+        _extract_features_4v4 = None
         if value_fns:
             VALUE_FN_4V4_LOADED = value_fns.get('VALUE_FN_4V4_LOADED', False)
             value_score_4v4 = value_fns.get('value_score_4v4', None)
-            extract_features_4v4 = value_fns.get('extract_features_4v4', None)
+            _extract_features_4v4 = value_fns.get('_extract_features_4v4', None)
 
         unique_players = set()
         for p in raw_p:
@@ -221,6 +221,25 @@ class TacticalQuadrantAgent:
         def get_next_quadrant(q):
             if ang_vel >= 0: return (q + 1) % 4
             else: return (q - 1) % 4
+
+        # Per-player total strength (planets + in-flight fleets) for leader detection and elimination priority
+        owner_strength = {}
+        for _p in planets:
+            if _p.owner != -1:
+                owner_strength[_p.owner] = owner_strength.get(_p.owner, 0) + _p.ships
+        for _f in raw_fleets:
+            if _f[1] != -1:
+                owner_strength[_f[1]] = owner_strength.get(_f[1], 0) + (_f[6] if len(_f) > 6 else 0)
+        _enemy_str = {ow: s for ow, s in owner_strength.items() if ow != player}
+        leader_id = max(_enemy_str, key=_enemy_str.get) if _enemy_str else None
+
+        def targeting_key(src, t):
+            d = dist(src.x, src.y, t.x, t.y)
+            if t.owner == leader_id:
+                d *= 0.80
+            if t.owner != -1 and t.owner != player and owner_strength.get(t.owner, 0) < 30:
+                d -= 500.0
+            return d
 
         my_static = [p for p in my_pl if is_static_planet(p, self._initial_by_id)]
         my_moving = [p for p in my_pl if not is_static_planet(p, self._initial_by_id)]
@@ -273,7 +292,7 @@ class TacticalQuadrantAgent:
 
             if best_aim and available_ships[src.id] >= send_ships:
                 # Value function safety harness veto check
-                if VALUE_FN_4V4_LOADED and value_score_4v4 and extract_features_4v4:
+                if VALUE_FN_4V4_LOADED and value_score_4v4 and _extract_features_4v4:
                     # Construct immediate post-action simulated state
                     sim_planets = []
                     for p in planets:
@@ -289,11 +308,12 @@ class TacticalQuadrantAgent:
                     sim_fleets.append([-1, player, src.x, src.y, best_aim[0], tgt.id, send_ships])
 
                     sim_dicts = [{'id':p[0],'owner':p[1],'x':p[2],'y':p[3],'radius':p[4],'ships':p[5],'production':p[6]} for p in sim_planets]
-                    feats = extract_features_4v4(sim_dicts, player, self.current_turn, n_hint=num_players, fleets=sim_fleets)
+                    feats = _extract_features_4v4(sim_dicts, player, self.current_turn, n_hint=num_players, fleets=sim_fleets)
                     pw = value_score_4v4(feats, self.current_turn)
                     
-                    # If GBC predicts win prob drops below 0.35, veto/suppress the attack
-                    if pw is not None and pw < 0.35:
+                    _baseline = 1.0 / max(2, num_players)
+                    _veto_thresh = _baseline - 0.05 if self.current_turn < 80 else _baseline + 0.05
+                    if pw is not None and pw < _veto_thresh:
                         return False
 
                 moves.append([src.id, best_aim[0], send_ships])
@@ -362,19 +382,19 @@ class TacticalQuadrantAgent:
                 for tank in tanks:
                     tgt = None
                     valid_small = [t for t in small_enemies if t.ships < available_ships[tank.id] and t.id not in vulnerable_planet_ids]
-                    if valid_small: tgt = min(valid_small, key=lambda t: dist(tank.x, tank.y, t.x, t.y))
+                    if valid_small: tgt = min(valid_small, key=lambda t: targeting_key(tank, t))
                     if not tgt:
                         valid_heavy = [t for t in heavy_enemies if t.ships < available_ships[tank.id] and t.id not in vulnerable_planet_ids]
-                        if valid_heavy: tgt = min(valid_heavy, key=lambda t: dist(tank.x, tank.y, t.x, t.y))
+                        if valid_heavy: tgt = min(valid_heavy, key=lambda t: targeting_key(tank, t))
                     if tgt: aim_and_send(tank, tgt, tgt.ships + 1)
 
                 for peep in small_peeps:
                     tgt = None
                     valid_small = [t for t in small_enemies if t.ships < available_ships[peep.id] and t.id not in vulnerable_planet_ids]
-                    if valid_small: tgt = min(valid_small, key=lambda t: dist(peep.x, peep.y, t.x, t.y))
+                    if valid_small: tgt = min(valid_small, key=lambda t: targeting_key(peep, t))
                     if not tgt:
                         valid_heavy = [t for t in heavy_enemies if t.ships < available_ships[peep.id] and t.id not in vulnerable_planet_ids]
-                        if valid_heavy: tgt = min(valid_heavy, key=lambda t: dist(peep.x, peep.y, t.x, t.y))
+                        if valid_heavy: tgt = min(valid_heavy, key=lambda t: targeting_key(peep, t))
                     if tgt: aim_and_send(peep, tgt, tgt.ships + 1)
 
             # --- Phase 3: Prev Quadrant Enemies (Shared Fleets) ---

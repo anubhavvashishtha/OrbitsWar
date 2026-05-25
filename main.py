@@ -26,12 +26,14 @@ from dataclasses import dataclass, field
 GLOBAL_TREES_1v1 = []; GLOBAL_INIT_1v1 = 0.0; GLOBAL_N_TREES_1v1 = 0
 EARLY_TREES_1v1  = []; EARLY_INIT_1v1  = 0.0; EARLY_N_TREES_1v1  = 0
 LATE_TREES_1v1   = []; LATE_INIT_1v1   = 0.0; LATE_N_TREES_1v1   = 0
+MID_TREES_1v1    = []; MID_INIT_1v1    = 0.0; MID_N_TREES_1v1    = 0
 VALUE_FN_1V1_LOADED = False
 
 # 4v4 Model Globals
 GLOBAL_TREES_4v4 = []; GLOBAL_INIT_4v4 = 0.0; GLOBAL_N_TREES_4v4 = 0
 EARLY_TREES_4v4  = []; EARLY_INIT_4v4  = 0.0; EARLY_N_TREES_4v4  = 0
 LATE_TREES_4v4   = []; LATE_INIT_4v4   = 0.0; LATE_N_TREES_4v4   = 0
+MID_TREES_4v4    = []; MID_INIT_4v4    = 0.0; MID_N_TREES_4v4    = 0
 VALUE_FN_4V4_LOADED = False
 
 # Load 1v1 weights
@@ -41,6 +43,8 @@ try:
     except ImportError: pass
     try: from value_fn_1v1 import LATE_TREES as LATE_TREES_1v1, LATE_INIT as LATE_INIT_1v1, LATE_N_TREES as LATE_N_TREES_1v1
     except ImportError: pass
+    try: from value_fn_1v1 import MID_TREES as MID_TREES_1v1, MID_INIT as MID_INIT_1v1, MID_N_TREES as MID_N_TREES_1v1
+    except ImportError: pass
 except ImportError:
     # Kaggle fallback (if dataset uploaded as old)
     try:
@@ -48,6 +52,8 @@ except ImportError:
         try: from old import EARLY_TREES as EARLY_TREES_1v1, EARLY_INIT as EARLY_INIT_1v1, EARLY_N_TREES as EARLY_N_TREES_1v1
         except ImportError: pass
         try: from old import LATE_TREES as LATE_TREES_1v1, LATE_INIT as LATE_INIT_1v1, LATE_N_TREES as LATE_N_TREES_1v1
+        except ImportError: pass
+        try: from old import MID_TREES as MID_TREES_1v1, MID_INIT as MID_INIT_1v1, MID_N_TREES as MID_N_TREES_1v1
         except ImportError: pass
     except ImportError:
         pass
@@ -59,6 +65,8 @@ try:
     except ImportError: pass
     try: from value_fn_4v4 import LATE_TREES as LATE_TREES_4v4, LATE_INIT as LATE_INIT_4v4, LATE_N_TREES as LATE_N_TREES_4v4
     except ImportError: pass
+    try: from value_fn_4v4 import MID_TREES as MID_TREES_4v4, MID_INIT as MID_INIT_4v4, MID_N_TREES as MID_N_TREES_4v4
+    except ImportError: pass
 except ImportError:
     # Kaggle fallback
     try:
@@ -66,6 +74,8 @@ except ImportError:
         try: from old_4v4 import EARLY_TREES as EARLY_TREES_4v4, EARLY_INIT as EARLY_INIT_4v4, EARLY_N_TREES as EARLY_N_TREES_4v4
         except ImportError: pass
         try: from old_4v4 import LATE_TREES as LATE_TREES_4v4, LATE_INIT as LATE_INIT_4v4, LATE_N_TREES as LATE_N_TREES_4v4
+        except ImportError: pass
+        try: from old_4v4 import MID_TREES as MID_TREES_4v4, MID_INIT as MID_INIT_4v4, MID_N_TREES as MID_N_TREES_4v4
         except ImportError: pass
     except ImportError:
         pass
@@ -88,6 +98,8 @@ def value_score_1v1(feats, turn=250):
         return _sig(_walk(EARLY_TREES_1v1, EARLY_INIT_1v1, feats))
     if turn >= 300 and LATE_N_TREES_1v1 > 0:
         return _sig(_walk(LATE_TREES_1v1, LATE_INIT_1v1, feats))
+    if MID_N_TREES_1v1 > 0:
+        return _sig(_walk(MID_TREES_1v1, MID_INIT_1v1, feats))
     if GLOBAL_N_TREES_1v1 > 0:
         return _sig(_walk(GLOBAL_TREES_1v1, GLOBAL_INIT_1v1, feats))
     return None
@@ -98,6 +110,8 @@ def value_score_4v4(feats, turn=250):
         return _sig(_walk(EARLY_TREES_4v4, EARLY_INIT_4v4, feats))
     if turn >= 300 and LATE_N_TREES_4v4 > 0:
         return _sig(_walk(LATE_TREES_4v4, LATE_INIT_4v4, feats))
+    if MID_N_TREES_4v4 > 0:
+        return _sig(_walk(MID_TREES_4v4, MID_INIT_4v4, feats))
     if GLOBAL_N_TREES_4v4 > 0:
         return _sig(_walk(GLOBAL_TREES_4v4, GLOBAL_INIT_4v4, feats))
     return None
@@ -2120,7 +2134,7 @@ def plan_moves(world, deadline=None):
                         pw = value_score_1v1(feats, world.step)
                     else:
                         sim_dicts = [{'id':p[0],'owner':p[1],'x':p[2],'y':p[3],'radius':p[4],'ships':p[5],'production':p[6]} for p in sim]
-                        feats_4v4 = extract_features_4v4(sim_dicts, world.player, world.step, n_hint=world.num_players, fleets=raw_f)
+                        feats_4v4 = _extract_features_4v4(sim_dicts, world.player, world.step, n_hint=world.num_players, fleets=raw_f)
                         pw = value_score_4v4(feats_4v4, world.step)
                     if pw is not None:
                         rl_boost = 0.35 * (pw - 0.5)
@@ -2381,7 +2395,7 @@ def plan_moves(world, deadline=None):
                         pw = value_score_1v1(feats, world.step)
                     else:
                         sim_dicts = [{'id':p[0],'owner':p[1],'x':p[2],'y':p[3],'radius':p[4],'ships':p[5],'production':p[6]} for p in sim]
-                        feats_4v4 = extract_features_4v4(sim_dicts, world.player, world.step, n_hint=world.num_players, fleets=raw_f)
+                        feats_4v4 = _extract_features_4v4(sim_dicts, world.player, world.step, n_hint=world.num_players, fleets=raw_f)
                         pw = value_score_4v4(feats_4v4, world.step)
                     if pw is not None:
                         rl_boost = 0.35 * (pw - 0.5)
@@ -2893,8 +2907,14 @@ def build_world(obs):
 _agent_4v4_instance = None
 
 def agent(obs, config=None):
+    try:
+        return _agent_impl(obs, config)
+    except Exception:
+        return []
+
+def _agent_impl(obs, config=None):
     global _agent_4v4_instance
-    
+
     # 1. Mode check: extract player and match info
     player = obs.player if hasattr(obs, "player") else obs.get("player", 0)
     raw_p  = obs.planets if hasattr(obs, "planets") else obs.get("planets", [])
@@ -2910,28 +2930,27 @@ def agent(obs, config=None):
             unique_players.add(f[1])
     num_players = max(2, len(unique_players))
     
-    # 2. If it's a 4-player game (FFA), delegate to the 4v4 heuristic agent with value function verification
+    # 2. If it's a 4-player game (FFA), use the quadrant heuristic agent with 4v4 GBC veto as primary.
+    #    Falls back to main planner only if agent_4v4 crashes.
     if num_players > 2:
         if _agent_4v4_instance is None:
             try:
                 import agent_4v4
                 _agent_4v4_instance = agent_4v4.agent_instance
-            except Exception as e:
-                # print(f"Error loading agent_4v4: {e}")
+            except Exception:
                 pass
         if _agent_4v4_instance is not None:
             value_fns = {
                 'VALUE_FN_4V4_LOADED': VALUE_FN_4V4_LOADED,
                 'value_score_4v4': value_score_4v4,
-                'extract_features_4v4': extract_features_4v4
+                '_extract_features_4v4': _extract_features_4v4
             }
             try:
                 return _agent_4v4_instance(obs, config, value_fns=value_fns)
-            except Exception as e:
-                # print(f"Error running agent_4v4: {e}, falling back to default planner")
+            except Exception:
                 pass
 
-    # 3. Otherwise (1v1 or fallback), run default main.py planning (beam search, swarm attacks, 1v1 GBC)
+    # 3. Otherwise (1v1), run default main.py planning (beam search, swarm attacks, 1v1 GBC)
     start_time = time.perf_counter()
     world = build_world(obs)
     if not world.my_planets:
@@ -2948,7 +2967,7 @@ def agent(obs, config=None):
     return plan_moves(world, deadline=deadline)
 
 __all__ = ["agent", "build_world"]
-def extract_features_4v4(state, player, turn, n_hint=2, fleets=None):
+def _extract_features_4v4(state, player, turn, n_hint=2, fleets=None):
     ms=mp=mpr=mc=ts=tpr=0.0; ed={}
     msl=[]; mprl=[]; mpos=[]; epos=[]
     
@@ -3066,4 +3085,6 @@ def extract_features_4v4(state, player, turn, n_hint=2, fleets=None):
     ]
 
 
-
+# Kaggle picks the last callable in the module dict as the agent entry point.
+# Re-insert 'agent' at the end so it wins over _extract_features_4v4.
+_t = agent; del agent; agent = _t; del _t

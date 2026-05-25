@@ -8,3 +8,4 @@ simulation
 records
 *.pkl
 *zip
+*.pt
