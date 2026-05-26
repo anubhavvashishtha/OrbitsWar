@@ -10,21 +10,21 @@ Output: OrbitsWar_TrainingDataset.zip
 What it includes
 ----------------
   records/          — Kaggle replay JSON files (training data)
-  enemy agents/     — Enemy bots for vs-bots fine-tuning
+  enemy agents/     — Enemy bots for vs-bots / RL self-play
   classifier/       — 1v1 GBC training scripts
   heuristic_4v4/    — 4v4 GBC training scripts + agent
   regressor/        — 1v1 GBR training scripts
   regressor_4v4/    — 4v4 GBR training scripts
-  main.py           — Required by vs-bots scripts (plays live games)
+  rl/               — PPO actor-critic training scripts (net, trainer, exporter)
+  main.py           — Required by vs-bots scripts and RL self-play
 
 What it excludes
 ----------------
-  value_fn_*.py     — These are OUTPUTS, not inputs (Kaggle produces them)
-  rl/               — PPO training is separate (train_ppo_kaggle.ipynb)
-  .pkl cache files  — Rebuilt automatically on first run
+  .pkl replay caches — Rebuilt automatically on first run (model.pkl IS included)
   .pyc / __pycache__
   submissions/
   .venv/
+  enemy agents/*/weights/ — enemy checkpoint files (not needed for training)
 
 Upload instructions
 -------------------
@@ -48,19 +48,18 @@ INCLUDE = [
     "heuristic_4v4",
     "regressor",
     "regressor_4v4",
+    "rl",
     "main.py",
 ]
 
 # Extensions to always skip
-SKIP_EXTS = {".pkl", ".pyc", ".pt", ".zip"}
+SKIP_EXTS = {".pyc", ".zip"}
 
 # Directory names to skip entirely
-SKIP_DIRS = {"__pycache__", ".venv", "submissions", ".git"}
+SKIP_DIRS = {"__pycache__", ".venv", "submissions", ".git", "weights"}
 
-# Filenames to skip (generated outputs — Kaggle produces these)
+# Filenames to skip — replay caches (large, rebuilt on first run); model.pkl IS included
 SKIP_FILES = {
-    "value_fn_1v1.py",
-    "value_fn_4v4.py",
     "replay_cache_v2.pkl",
     "replay_cache_4v4.pkl",
     "replay_td_cache.pkl",

@@ -350,7 +350,7 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
     best_wr = 0.0
     start_rnd = 1
 
-    load_from = BEST_MODEL_PATH if BEST_MODEL_PATH.exists() else MODEL_PATH
+    load_from = MODEL_PATH if MODEL_PATH.exists() else BEST_MODEL_PATH
     if load_from.exists():
         try:
             best_wr, start_rnd = load_ckpt(load_from, model)

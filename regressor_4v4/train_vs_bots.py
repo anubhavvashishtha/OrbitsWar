@@ -45,6 +45,7 @@ _rtfr                = _load_reg_train()
 get_td_trajectories  = _rtfr.get_td_trajectories
 get_val_trajectories = _rtfr.get_val_trajectories
 train_and_export     = _rtfr.train_and_export
+MODEL_PKL            = _rtfr.MODEL_PKL
 
 
 def _read(obs, key, default=None):
@@ -109,6 +110,8 @@ def collect_exhaustive_trajectories(enemy_pool, passes):
 
             traj = []
             for step_idx, step_states in enumerate(steps):
+                if _read(step_states[0], "done", False):
+                    break  # player 0 eliminated — stop collecting stale observations
                 obs = _read(step_states[0], "observation")
                 if obs is None:
                     continue
@@ -136,16 +139,21 @@ def main():
     ap.add_argument("--reward-scale",type=float, default=0.1)
     args = ap.parse_args()
 
-    print("=" * 60)
-    print("  regressor_4v4/train_vs_bots: exhaustive C(n,3) pretraining")
-    print("=" * 60)
+    import joblib
 
-    print("\nLoading replay trajectories (seed) ...")
-    replay_trajs = get_td_trajectories()
-    print(f"  {len(replay_trajs)} replay trajectories")
+    print("=" * 60)
+    print("  regressor_4v4/train_vs_bots: warm-start fine-tune via C(n,3) bot coverage")
+    print("=" * 60)
 
     val_trajs = get_val_trajectories()
     print(f"  {len(val_trajs)} val trajectories")
+
+    base_model = None
+    if os.path.exists(MODEL_PKL):
+        base_model = joblib.load(MODEL_PKL)
+        print(f"  Loaded base model from {MODEL_PKL}")
+    else:
+        print(f"  WARNING: {MODEL_PKL} not found — will train from scratch on bot data.")
 
     _std = [p for p in glob.glob(str(ENEMY_DIR / "*" / "main.py"))
             if Path(p).parent.name != "my"]
@@ -165,13 +173,13 @@ def main():
     wins = sum(t["won"] for t in bot_trajs)
     print(f"\n  {len(bot_trajs)} trajectories collected  ({wins:.0f} wins)")
 
-    combined = bot_trajs + replay_trajs
-    print(f"\nFinal: {len(bot_trajs)} bot + {len(replay_trajs)} replay = {len(combined)} trajectories")
+    print(f"\nBot-game dataset: {len(bot_trajs)} trajectories")
 
-    print("\nRetraining TD regressor ...")
+    print("\nFine-tuning TD regressor (warm-start on bot data) ...")
     ok = train_and_export(
-        combined, val_trajectories=val_trajs,
+        bot_trajs, val_trajectories=val_trajs,
         gamma=args.gamma, reward_scale=args.reward_scale,
+        base_model=base_model,
     )
     print("\nvalue_fn_4v4.py updated." if ok else "\nTraining failed.")
 

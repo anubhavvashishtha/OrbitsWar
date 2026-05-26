@@ -109,6 +109,8 @@ def collect_exhaustive_records(enemy_pool, passes, snapshot_every):
                   f"  {tag}  vs [{', '.join(e_names)}]")
 
             for step_idx, step_states in enumerate(steps):
+                if _read(step_states[0], "done", False):
+                    break  # player 0 eliminated — stop collecting stale observations
                 if step_idx % snapshot_every != 0:
                     continue
                 obs = _read(step_states[0], "observation")
@@ -135,17 +137,22 @@ def main():
                     help="Collect a record every N steps (default: 5)")
     args = ap.parse_args()
 
-    from train_4v4 import get_balanced_replay_records, get_val_records, train_and_export
+    import joblib
+    from train_4v4 import get_val_records, train_and_export, MODEL_PKL
 
     print("=" * 60)
-    print("  train_4v4_vs_bots: exhaustive C(n,3) pretraining")
+    print("  train_4v4_vs_bots: warm-start fine-tune via C(n,3) bot coverage")
     print("=" * 60)
 
-    print("\nLoading 4v4 replay anchor data ...")
-    replay_records = get_balanced_replay_records()
-    print(f"  {len(replay_records)} replay records loaded")
     val_records = get_val_records()
     print(f"  {len(val_records)} validation records loaded")
+
+    base_models = None
+    if os.path.exists(MODEL_PKL):
+        base_models = joblib.load(MODEL_PKL)
+        print(f"  Loaded base models from {MODEL_PKL}")
+    else:
+        print(f"  WARNING: {MODEL_PKL} not found — will train from scratch on bot data.")
 
     _std = [p for p in glob.glob(str(ENEMY_DIR / "*" / "main.py"))
             if Path(p).parent.name != "my"]
@@ -166,13 +173,10 @@ def main():
     wins = sum(r["won"] for r in bot_records)
     print(f"\n  {len(bot_records)} steps collected  ({wins} winning-player steps)")
 
-    # Replay records used as anchor — mixed in after bot-game data
-    total = len(bot_records) + len(replay_records)
-    print(f"\nFinal dataset: {len(bot_records)} bot-game + {len(replay_records)} replay anchor"
-          f" = {total} records")
+    print(f"\nBot-game dataset: {len(bot_records)} records")
 
-    print("\nRetraining GBC ...")
-    ok = train_and_export(bot_records + replay_records, val_records=val_records)
+    print("\nFine-tuning GBC (warm-start on bot data) ...")
+    ok = train_and_export(bot_records, val_records=val_records, base_models=base_models)
     if ok:
         print("\nvalue_fn_4v4.py updated.")
     else:

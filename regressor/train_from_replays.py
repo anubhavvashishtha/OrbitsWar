@@ -71,6 +71,7 @@ from train_from_replays import extract_features, snap, split_replay_files
 
 VALUEFN       = str(ROOT / "value_fn_1v1.py")
 TD_CACHE_FILE = str(ROOT / "replay_td_cache.pkl")
+MODEL_PKL     = str(ROOT / "model.pkl")
 
 TD_SNAPSHOT_EVERY = 1       # every turn — dense transitions for TD
 N_ESTIMATORS      = 600
@@ -214,20 +215,25 @@ def _compute_td_values(trajectories, gamma=0.99, reward_scale=0.1):
 def train_and_export(trajectories, val_trajectories=None,
                      gamma=0.99, reward_scale=0.1,
                      n_estimators=N_ESTIMATORS, max_depth=MAX_DEPTH,
-                     learning_rate=LEARNING_RATE):
+                     learning_rate=LEARNING_RATE,
+                     base_model=None, n_extra=200):
     """
     Train GBR on TD targets and export trees to value_fn_1v1.py.
     `trajectories`: list of {'traj': [feats...], 'won': float, 'n_agents': int}
+    Pass `base_model` to warm-start from an existing GBR instead of training from scratch.
     """
     try:
         import numpy as np
         from sklearn.ensemble import GradientBoostingRegressor
         from sklearn.metrics import mean_squared_error
+        import joblib
     except ImportError:
-        print("pip install scikit-learn numpy"); return False
+        print("pip install scikit-learn numpy joblib"); return False
 
     if not trajectories:
         print("No trajectories to train on."); return False
+
+    warm = base_model is not None
 
     print("Computing TD regression targets ...")
     train_pairs = _compute_td_values(trajectories, gamma=gamma, reward_scale=reward_scale)
@@ -251,13 +257,18 @@ def train_and_export(trajectories, val_trajectories=None,
     if len(X_train) < 200:
         print(f"Too few samples ({len(X_train)}). Skipping."); return False
 
-    print(f"\n  GLOBAL  {len(X_train):,} train  ...")
-    reg = GradientBoostingRegressor(
-        n_estimators=n_estimators, max_depth=max_depth,
-        learning_rate=learning_rate, subsample=0.8,
-        min_samples_leaf=30, random_state=42,
-        loss="squared_error", verbose=1,
-    )
+    if warm:
+        print(f"\n  GLOBAL  {len(X_train):,} train  (warm-start +{n_extra} trees) ...")
+        reg = base_model
+        reg.set_params(warm_start=True, n_estimators=reg.n_estimators + n_extra)
+    else:
+        print(f"\n  GLOBAL  {len(X_train):,} train  ...")
+        reg = GradientBoostingRegressor(
+            n_estimators=n_estimators, max_depth=max_depth,
+            learning_rate=learning_rate, subsample=0.8,
+            min_samples_leaf=30, random_state=42,
+            loss="squared_error", verbose=1,
+        )
     reg.fit(X_train, logit_train)
 
     if X_val is not None and len(X_val) >= 10:
@@ -290,6 +301,13 @@ def train_and_export(trajectories, val_trajectories=None,
         f.write("\n".join(lines) + "\n")
     sz = os.path.getsize(VALUEFN) / 1024
     print(f"\nExported -> {VALUEFN}  ({sz:.1f} KB)")
+
+    try:
+        joblib.dump(reg, MODEL_PKL)
+        print(f"Saved    -> {MODEL_PKL}")
+    except Exception as e:
+        print(f"[warn] Could not save model.pkl: {e}")
+
     return True
 
 

@@ -114,17 +114,22 @@ def main():
                     help="Collect a record every N steps (default: 5)")
     args = ap.parse_args()
 
-    from train_from_replays import get_balanced_replay_records, get_val_records, train_and_export
+    import joblib
+    from train_from_replays import get_val_records, train_and_export, MODEL_PKL
 
     print("=" * 60)
-    print("  train_1v1_vs_bots: fine-tune 1v1 value function")
+    print("  train_1v1_vs_bots: warm-start fine-tune 1v1 value function")
     print("=" * 60)
 
-    print("\nLoading replay seed data ...")
-    replay_records = get_balanced_replay_records()
-    print(f"  {len(replay_records)} replay records loaded")
     val_records = get_val_records()
     print(f"  {len(val_records)} validation records loaded")
+
+    base_models = None
+    if os.path.exists(MODEL_PKL):
+        base_models = joblib.load(MODEL_PKL)
+        print(f"  Loaded base models from {MODEL_PKL}")
+    else:
+        print(f"  WARNING: {MODEL_PKL} not found — will train from scratch on bot data.")
 
     _std = [p for p in glob.glob(str(ENEMY_DIR / "*" / "main.py"))
             if Path(p).parent.name != "my"]
@@ -152,13 +157,12 @@ def main():
         except Exception as e:
             print(f"  WARN skipping {name}: {e}")
 
-    total = len(replay_records) + len(bot_records)
-    print(f"\nCombined: {len(replay_records)} replay + {len(bot_records)} bot-game = {total} records")
+    print(f"\nBot-game dataset: {len(bot_records)} records")
 
-    print("\nRetraining GBC ...")
-    ok = train_and_export(replay_records + bot_records, val_records=val_records)
+    print("\nFine-tuning GBC (warm-start on bot data) ...")
+    ok = train_and_export(bot_records, val_records=val_records, base_models=base_models)
     if ok:
-        print("\nvalue_fn_1v1.py updated with bot-game data.")
+        print("\nvalue_fn_1v1.py updated with bot-game fine-tuning.")
     else:
         print("\nTraining failed — value_fn_1v1.py unchanged.")
 
