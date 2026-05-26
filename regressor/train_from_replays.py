@@ -79,8 +79,59 @@ MAX_DEPTH         = 5
 LEARNING_RATE     = 0.003
 
 
+# ── Dense in-game reward constants (must match rl/self_play_trainer.py) ─────
+# These reward the value function for the actual game-events it should care
+# about, not just feature-delta noise. See self_play_trainer.py for full
+# documentation of what each constant means.
+CAPTURE_BASE        = 0.06
+CAPTURE_FROM_ENEMY  = 0.04
+PLANET_LOSS         = 0.06
+ELIMINATION_BONUS   = 0.30
+MOMENTUM_SCALE      = 0.02
+
+
+def _alive_owners(sd, fleets, ignore_player):
+    """Owners that still have a planet or a fleet (excluding `ignore_player` and -1)."""
+    alive = set()
+    for p in sd:
+        ow = p.get("owner", -1)
+        if ow != -1 and ow != ignore_player:
+            alive.add(ow)
+    for f in (fleets or []):
+        fow = f[1] if isinstance(f, (list, tuple)) else f.get("owner", -1)
+        if fow != -1 and fow != ignore_player:
+            alive.add(fow)
+    return alive
+
+
+def _event_reward(prev_sd, curr_sd, prev_alive, curr_alive, player):
+    """Per-turn shaped reward from planet captures/losses + opponent eliminations."""
+    if prev_sd is None:
+        return 0.0
+    prev_owner = {p["id"]: p.get("owner", -1)            for p in prev_sd}
+    prev_prod  = {p["id"]: float(p.get("production", 0)) for p in prev_sd}
+    r = 0.0
+    for cp in curr_sd:
+        pid = cp["id"]
+        if pid not in prev_owner:
+            continue
+        po = prev_owner[pid]
+        co = cp.get("owner", -1)
+        if co == po:
+            continue
+        prod = max(prev_prod.get(pid, 1.0), float(cp.get("production", 0)))
+        if co == player and po != player:
+            r += CAPTURE_BASE * prod
+            if po != -1:
+                r += CAPTURE_FROM_ENEMY * prod
+        elif po == player and co != player:
+            r -= PLANET_LOSS * prod
+    r += ELIMINATION_BONUS * len(prev_alive - curr_alive)
+    return r
+
+
 def _parse_replay_td(rf):
-    """Parse one replay JSON into 1v1 per-player feature trajectories."""
+    """Parse one replay JSON into 1v1 per-player feature trajectories + dense rewards."""
     with open(rf, "r", encoding="utf-8") as f:
         data = json.load(f)
     steps = data.get("steps", [])
@@ -97,6 +148,11 @@ def _parse_replay_td(rf):
     winner    = -1 if (rewards.count(max_r) > 1 or max_r <= 0) else rewards.index(max_r)
 
     trajectories = [[] for _ in range(n_agents)]
+    shaped_per_player = [[] for _ in range(n_agents)]
+    prev_sd_player    = [None] * n_agents
+    prev_alive_player = [set() for _ in range(n_agents)]
+    prev_share_player = [None] * n_agents
+
     for step_idx, step_data in enumerate(steps):
         if step_idx % TD_SNAPSHOT_EVERY != 0:
             continue
@@ -109,13 +165,36 @@ def _parse_replay_td(rf):
         sd = snap(rp, ci)
         if not sd:
             continue
+
+        tot_s = sum(float(p.get("ships", 0))      for p in sd) or 1.0
+        tot_p = sum(float(p.get("production", 0)) for p in sd) or 1.0
+        tot_pl = float(len(sd)) or 1.0
+
         for i in range(n_agents):
             trajectories[i].append(extract_features(sd, i, step_idx, n_agents, fleets=rf_fleets))
+            curr_alive = _alive_owners(sd, rf_fleets, ignore_player=i)
+            r_event = _event_reward(prev_sd_player[i], sd, prev_alive_player[i], curr_alive, i)
+            my_s = sum(float(p.get("ships", 0))      for p in sd if p.get("owner") == i)
+            my_p = sum(float(p.get("production", 0)) for p in sd if p.get("owner") == i)
+            my_pl = sum(1 for p in sd if p.get("owner") == i)
+            curr_share = (my_s / tot_s, my_p / tot_p, my_pl / tot_pl)
+            if prev_share_player[i] is not None:
+                ds, dp, dpl = (a - b for a, b in zip(curr_share, prev_share_player[i]))
+                r_event += MOMENTUM_SCALE * (0.4 * ds + 0.4 * dp + 0.2 * dpl)
+            shaped_per_player[i].append(r_event)
+            prev_sd_player[i]    = sd
+            prev_alive_player[i] = curr_alive
+            prev_share_player[i] = curr_share
 
     result = []
     for i, traj in enumerate(trajectories):
         if len(traj) >= 2:
-            result.append({"traj": traj, "won": 1.0 if i == winner else 0.0, "n_agents": 2})
+            result.append({
+                "traj":     traj,
+                "won":      1.0 if i == winner else 0.0,
+                "n_agents": 2,
+                "shaped":   shaped_per_player[i],
+            })
     return result
 
 
@@ -138,7 +217,9 @@ def get_td_trajectories(replay_files=None):
     n_cached = n_fresh = 0
 
     for i, rf in enumerate(replay_files):
-        cache_key = f"td|{rf}|{os.path.getmtime(rf):.0f}"
+        # v2: trajectory dicts now include a 'shaped' field (per-step event rewards).
+        # Old v1 entries silently miss; they get re-parsed and overwritten.
+        cache_key = f"td|v2|{rf}|{os.path.getmtime(rf):.0f}"
         if cache_key in cache:
             all_trajectories.extend(cache[cache_key])
             n_cached += 1
@@ -184,27 +265,34 @@ def _compute_td_values(trajectories, gamma=0.99, reward_scale=0.1):
     Backward-pass TD returns for every step of every trajectory.
         V(s_T) = won
         V(s_t) = shaped_r(t,t+1) + gamma * V(s_{t+1})
-    Returns list of (feats, V) pairs, V in [0, 1].
-    Feature indices: 2=planet_share, 4=ship_share, 6=prod_share.
+
+    Prefers the per-step dense rewards stored on the trajectory dict
+    (planet capture / loss / opponent elimination events). Falls back to
+    the legacy feature-delta shaping when missing (old cache entries).
+    Returns list of (feats, V) pairs, V clipped to [0, 1].
     """
     pairs = []
     for td in trajectories:
-        traj = td["traj"]
-        won  = td["won"]
-        T    = len(traj)
+        traj   = td["traj"]
+        won    = td["won"]
+        shaped = td.get("shaped")
+        T      = len(traj)
 
-        shaped = [0.0] * T
-        for t in range(1, T):
-            shaped[t] = reward_scale * (
-                0.4 * (traj[t][4] - traj[t-1][4]) +   # ship share delta
-                0.4 * (traj[t][6] - traj[t-1][6]) +   # prod share delta
-                0.2 * (traj[t][2] - traj[t-1][2])     # planet share delta
-            )
+        if shaped is None or len(shaped) != T:
+            # Legacy path — feature-delta shaping (matches old cache entries).
+            shaped = [0.0] * T
+            for t in range(1, T):
+                shaped[t] = reward_scale * (
+                    0.4 * (traj[t][4] - traj[t-1][4]) +
+                    0.4 * (traj[t][6] - traj[t-1][6]) +
+                    0.2 * (traj[t][2] - traj[t-1][2])
+                )
 
         V = [0.0] * T
         V[T - 1] = won
         for t in range(T - 2, -1, -1):
-            V[t] = shaped[t + 1] + gamma * V[t + 1]
+            v = shaped[t + 1] + gamma * V[t + 1]
+            V[t] = max(0.0, min(1.0, v))
 
         for t in range(T):
             pairs.append((traj[t], V[t]))

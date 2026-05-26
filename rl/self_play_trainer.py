@@ -152,8 +152,30 @@ def _restore_main(main_mod, orig: dict):
             setattr(main_mod, k, v)
 
 
-# ── Reward shaping (TODO #1) ──────────────────────────────────────────────────
-REWARD_SCALE = 0.1   # keeps shaped part small so terminal win/loss dominates
+# ── Reward shaping (event-based + small momentum) ─────────────────────────────
+#
+# In-game rewards (per-turn, signed; cumulative sum over 500 turns is roughly
+# the same order of magnitude as the terminal win/loss=1/0 signal):
+#
+#   +CAPTURE_BASE * production         on capturing a planet (any prior owner)
+#   +CAPTURE_FROM_ENEMY * production   extra bonus when prior owner was an enemy
+#                                       (capturing from an enemy is worth more
+#                                        than grabbing a neutral)
+#   -PLANET_LOSS * production          on losing one of my planets
+#   +ELIMINATION                       per opponent eliminated this turn
+#                                       (they have 0 planets + 0 fleets left)
+#   +MOMENTUM_SCALE * Δshares          small continuous signal so flat-but-
+#                                       improving turns also get some credit
+#
+# These constants are tuned so a typical winning trajectory accumulates ~1.0
+# total shaped reward (matching the terminal scale), which means the early
+# game is no longer credit-starved.
+CAPTURE_BASE        = 0.06   # per planet captured, scaled by its production
+CAPTURE_FROM_ENEMY  = 0.04   # extra on top when prior owner was an enemy
+PLANET_LOSS         = 0.06   # symmetric penalty for losing a planet
+ELIMINATION_BONUS   = 0.30   # per opponent fully knocked out this turn
+MOMENTUM_SCALE      = 0.02   # weight on continuous share-delta term
+
 
 def _game_stats(sd, player):
     """Sum my/total ships, production, planet count from a snap list."""
@@ -171,17 +193,61 @@ def _game_stats(sd, player):
     return (my_ships, my_prod, my_planets, total_ships, total_prod, total_planets)
 
 
-def _shaped_reward(curr, prev):
-    """
-    r_t = 0.4*(d_ship_share) + 0.4*(d_prod_share) + 0.2*(d_planet_share)
-    Scaled by REWARD_SCALE so terminal reward (1.0) stays dominant.
-    """
-    my_s, my_pr, my_pl, tot_s, tot_pr, tot_pl = curr
-    ps,   ppr,   ppl,   _,     _,      _      = prev
+def _alive_enemies(sd, raw_fleets, player):
+    """Owners that still have any planet or any in-flight fleet."""
+    alive = set()
+    for p in sd:
+        ow = p.get("owner", -1)
+        if ow != -1 and ow != player:
+            alive.add(ow)
+    for f in (raw_fleets or []):
+        fow = f[1] if isinstance(f, (list, tuple)) else f.get("owner", -1)
+        if fow != -1 and fow != player:
+            alive.add(fow)
+    return alive
+
+
+def _event_reward(prev_sd, curr_sd, prev_alive, curr_alive, player):
+    """Capture/loss/elimination events between two consecutive snapshots."""
+    if prev_sd is None:
+        return 0.0
+    prev_owner = {p["id"]: p.get("owner", -1)        for p in prev_sd}
+    prev_prod  = {p["id"]: float(p.get("production", 0)) for p in prev_sd}
+    r = 0.0
+    for cp in curr_sd:
+        pid = cp["id"]
+        if pid not in prev_owner:
+            continue
+        po = prev_owner[pid]
+        co = cp.get("owner", -1)
+        if co == po:
+            continue
+        prod = max(prev_prod.get(pid, 1.0), float(cp.get("production", 0)))
+        if co == player and po != player:
+            r += CAPTURE_BASE * prod
+            if po != -1:
+                r += CAPTURE_FROM_ENEMY * prod
+        elif po == player and co != player:
+            r -= PLANET_LOSS * prod
+    eliminated = prev_alive - curr_alive
+    r += ELIMINATION_BONUS * len(eliminated)
+    return r
+
+
+def _shaped_reward(curr_stats, prev_stats, prev_sd, curr_sd,
+                   prev_alive, curr_alive, player):
+    """Event-based dense reward + small momentum term."""
+    if prev_stats is None or prev_sd is None:
+        return 0.0
+    event_r = _event_reward(prev_sd, curr_sd, prev_alive, curr_alive, player)
+
+    my_s, my_pr, my_pl, tot_s, tot_pr, tot_pl = curr_stats
+    ps,   ppr,   ppl,   _,     _,      _      = prev_stats
     d_ships   = (my_s  - ps)  / max(1.0, tot_s)
     d_prod    = (my_pr - ppr) / max(1.0, tot_pr)
     d_planets = (my_pl - ppl) / max(1.0, tot_pl)
-    return REWARD_SCALE * (0.4 * d_ships + 0.4 * d_prod + 0.2 * d_planets)
+    momentum = MOMENTUM_SCALE * (0.4 * d_ships + 0.4 * d_prod + 0.2 * d_planets)
+    return event_r + momentum
 
 
 # ── Game runner ───────────────────────────────────────────────────────────────
@@ -202,6 +268,8 @@ def play_game_collect(model, agent_fns, seed: int = 0):
     buf        = RolloutBuffer(gamma=GAMMA, lam=GAE_LAMBDA)
     main_mod   = sys.modules.get("main")
     prev_stats = None   # for shaped reward computation
+    prev_sd    = None
+    prev_alive = set()
 
     states = env.step([[]] * n)
     step   = 0
@@ -228,9 +296,16 @@ def play_game_collect(model, agent_fns, seed: int = 0):
             sd = snap(rp, ci)
             if sd:
                 curr_stats = _game_stats(sd, 0)
-                if prev_stats is not None:
-                    shaped_r = _shaped_reward(curr_stats, prev_stats)
+                curr_alive = _alive_enemies(sd, rf, 0)
+                shaped_r = _shaped_reward(
+                    curr_stats, prev_stats,
+                    prev_sd, sd,
+                    prev_alive, curr_alive,
+                    player=0,
+                )
                 prev_stats = curr_stats
+                prev_sd    = sd
+                prev_alive = curr_alive
 
                 n_p = max(2, len({p[1] for p in rp if p[1] != -1}))
                 feats = extract_features(sd, 0, step, n_p, fleets=rf)

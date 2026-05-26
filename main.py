@@ -1618,6 +1618,7 @@ def build_snipe_mission(src, target, src_available, world, planned_commitments, 
         value = target_value(target, sync_turn, "snipe", world, modes, policy)
         if value <= 0:
             continue
+        value *= _value_boost(world, src.id, angle, send_pref)
 
         score = apply_score_modifiers(value / (send_pref + sync_turn * SNIPE_COST_TURN_WEIGHT + 1.0), target, "snipe", world)
         option = ShotOption(score=score, src_id=src.id, target_id=target.id, angle=angle, turns=turns, needed=need, send_cap=send_pref, mission="snipe", anchor_turn=enemy_eta)
@@ -1655,6 +1656,7 @@ def build_rescue_missions(world, policy, planned_commitments, modes):
             value = target.production * saved_turns + max(0, target.ships) * DEFENSE_SHIP_VALUE
             if world.enemy_planets and nearest_distance_to_set(target.x, target.y, world.enemy_planets) < 22:
                 value *= DEFENSE_FRONTIER_SCORE_MULT
+            value *= _value_boost(world, src.id, angle, send_pref)
             score = value / (send_pref + turns * DEFENSE_COST_TURN_WEIGHT + 1.0)
 
             option = ShotOption(score=score, src_id=src.id, target_id=target.id, angle=angle, turns=turns, needed=need, send_cap=send_pref, mission="rescue", anchor_turn=fall_turn)
@@ -1696,6 +1698,7 @@ def build_recapture_missions(world, policy, planned_commitments, modes):
             if world.enemy_planets and nearest_distance_to_set(target.x, target.y, world.enemy_planets) < 22:
                 value *= RECAPTURE_FRONTIER_MULT
             value *= RECAPTURE_VALUE_MULT
+            value *= _value_boost(world, src.id, angle, send_pref)
             score = value / (send_pref + turns * RECAPTURE_COST_TURN_WEIGHT + 1.0)
 
             option = ShotOption(score=score, src_id=src.id, target_id=target.id, angle=angle, turns=turns, needed=need, send_cap=send_pref, mission="recapture", anchor_turn=fall_turn)
@@ -1741,6 +1744,7 @@ def build_reinforce_missions(world, policy, planned_commitments, modes, inventor
 
             angle, turns, _, need, send_pref = plan
             value = reinforce_value(target, hold_until, world, policy)
+            value *= _value_boost(world, src.id, angle, send_pref)
             score = value / (send_pref + turns * REINFORCE_COST_TURN_WEIGHT + 1.0)
 
             option = ShotOption(score=score, src_id=src.id, target_id=target.id, angle=angle, turns=turns, needed=need, send_cap=send_pref, mission="reinforce", anchor_turn=hold_until)
@@ -1779,6 +1783,7 @@ def build_crash_exploit_missions(world, policy, planned_commitments, modes):
             value = target_value(target, turns, "crash_exploit", world, modes, policy)
             if value <= 0:
                 continue
+            value *= _value_boost(world, src.id, angle, send_pref)
 
             score = apply_score_modifiers(value / (send_pref + turns * SNIPE_COST_TURN_WEIGHT + 1.0), target, "crash_exploit", world)
             option = ShotOption(score=score, src_id=src.id, target_id=target.id, angle=angle, turns=turns, needed=need, send_cap=send_pref, mission="crash_exploit", anchor_turn=desired_arrival)
@@ -1840,6 +1845,7 @@ def build_tot_swarm_missions(world, policy, planned_commitments, modes):
                 send_cap = min(launcher['budget'], need)
                 value = target_value(target, anchor_turn, "swarm", world, modes, policy)
                 if value <= 0: continue
+                value *= _value_boost(world, launcher['src_id'], launcher['angle'], send_cap)
                 score = apply_score_modifiers(value / (send_cap + anchor_turn * ATTACK_COST_TURN_WEIGHT + 1.0), target, "swarm", world)
                 option = ShotOption(score=score, src_id=launcher['src_id'], target_id=target.id, angle=launcher['angle'], turns=launcher['eta'], needed=need, send_cap=send_cap, mission="tot_swarm", anchor_turn=anchor_turn)
                 missions.append(Mission(kind="tot_swarm", score=score, target_id=target.id, turns=anchor_turn, options=[option]))
@@ -1901,14 +1907,21 @@ def build_sync_swarm_missions(world, policy, planned_commitments, modes):
                 value = target_value(target, joint_turn, "swarm", world, modes, policy)
                 if value <= 0:
                     continue
-                
+                # Apply best per-source boost across participants
+                _best_boost = 1.0
+                for s in window:
+                    _b = _value_boost(world, s['src_id'], s['angle'], min(s['budget'], need))
+                    if _b > _best_boost:
+                        _best_boost = _b
+                value *= _best_boost
+
                 # Score the swarm
                 score = apply_score_modifiers(
                     value / (need + joint_turn * ATTACK_COST_TURN_WEIGHT + 1.0),
                     target, "swarm", world
                 )
                 score *= THREE_SOURCE_PLAN_PENALTY if window_size >= 3 else MULTI_SOURCE_PLAN_PENALTY
-                
+
                 options = []
                 for s in window:
                     send_cap = min(s['budget'], need)
@@ -1966,7 +1979,8 @@ def build_interception_missions(world, policy, planned_commitments, modes):
             # Value: steal the planet + destroy enemy fleet
             value = target_value(target, my_eta, "capture", world, modes, policy)
             value += fleet.ships * 2.0  # Bonus for destroying enemy fleet
-            
+            value *= _value_boost(world, src.id, my_angle, min(src_left, need + 3))
+
             score = apply_score_modifiers(
                 value / (need + my_eta * ATTACK_COST_TURN_WEIGHT + 1.0),
                 target, "capture", world
@@ -2104,6 +2118,9 @@ def plan_moves(world, deadline=None):
                     if time_filters_pass(target, p_turns, global_needed, src_available):
                         partial_value = target_value(target, p_turns, "swarm", world, modes, policy)
                         if partial_value > 0:
+                            _pb = _value_boost(world, src.id, p_angle, partial_send_cap)
+                            partial_value *= _pb
+                            rl_boost_map.setdefault((src.id, target.id), _pb - 1.0)
                             partial_score = apply_score_modifiers(partial_value / (partial_send_cap + p_turns * ATTACK_COST_TURN_WEIGHT + 1.0), target, "swarm", world)
                             source_options_by_target[target.id].append(ShotOption(score=partial_score, src_id=src.id, target_id=target.id, angle=p_angle, turns=p_turns, needed=global_needed, send_cap=partial_send_cap, mission="swarm"))
 
@@ -2123,23 +2140,10 @@ def plan_moves(world, deadline=None):
                 if value <= 0:
                     continue
 
-                # RL ENHANCEMENT: Re-rank with value function when available
-                is_1v1 = (world.num_players == 2)
-                if (is_1v1 and VALUE_FN_1V1_LOADED) or (not is_1v1 and VALUE_FN_4V4_LOADED):
-                    raw_p = [[p.id, p.owner, p.x, p.y, p.radius, p.ships, p.production] for p in world.planets]
-                    raw_f = [[f.id, f.owner, f.x, f.y, f.angle, f.from_planet_id, f.ships] for f in world.fleets]
-                    sim = _sim_move(raw_p, raw_f, world.player, src.id, angle, send_cap)
-                    if is_1v1:
-                        feats = _extract_features(sim, world.player, world.step, fleets_raw=raw_f)
-                        pw = value_score_1v1(feats, world.step)
-                    else:
-                        sim_dicts = [{'id':p[0],'owner':p[1],'x':p[2],'y':p[3],'radius':p[4],'ships':p[5],'production':p[6]} for p in sim]
-                        feats_4v4 = _extract_features_4v4(sim_dicts, world.player, world.step, n_hint=world.num_players, fleets=raw_f)
-                        pw = value_score_4v4(feats_4v4, world.step)
-                    if pw is not None:
-                        rl_boost = 0.35 * (pw - 0.5)
-                        rl_boost_map[(src.id, target.id)] = rl_boost
-                        value *= (1.0 + rl_boost)
+                # RL ENHANCEMENT: re-rank with value function (single call via helper)
+                vb = _value_boost(world, src.id, angle, send_cap)
+                rl_boost_map[(src.id, target.id)] = vb - 1.0
+                value *= vb
 
                 score = apply_score_modifiers(value / (send_cap + turns * ATTACK_COST_TURN_WEIGHT + 1.0), target, "capture", world)
                 option = ShotOption(score=score, src_id=src.id, target_id=target.id, angle=angle, turns=turns, needed=needed, send_cap=send_cap, mission="capture")
@@ -2385,21 +2389,7 @@ def plan_moves(world, deadline=None):
                     continue
 
                 # RL re-ranking for follow-up too
-                is_1v1 = (world.num_players == 2)
-                if (is_1v1 and VALUE_FN_1V1_LOADED) or (not is_1v1 and VALUE_FN_4V4_LOADED):
-                    raw_p = [[p.id, p.owner, p.x, p.y, p.radius, p.ships, p.production] for p in world.planets]
-                    raw_f = [[f.id, f.owner, f.x, f.y, f.angle, f.from_planet_id, f.ships] for f in world.fleets]
-                    sim = _sim_move(raw_p, raw_f, world.player, src.id, plan[0], final_send)
-                    if is_1v1:
-                        feats = _extract_features(sim, world.player, world.step, fleets_raw=raw_f)
-                        pw = value_score_1v1(feats, world.step)
-                    else:
-                        sim_dicts = [{'id':p[0],'owner':p[1],'x':p[2],'y':p[3],'radius':p[4],'ships':p[5],'production':p[6]} for p in sim]
-                        feats_4v4 = _extract_features_4v4(sim_dicts, world.player, world.step, n_hint=world.num_players, fleets=raw_f)
-                        pw = value_score_4v4(feats_4v4, world.step)
-                    if pw is not None:
-                        rl_boost = 0.35 * (pw - 0.5)
-                        value *= (1.0 + rl_boost)
+                value *= _value_boost(world, src.id, plan[0], final_send)
 
                 score = apply_score_modifiers(value / (final_send + turns * ATTACK_COST_TURN_WEIGHT + 1.0), target, "capture", world)
                 if best is None or score > best[0]:
@@ -2867,6 +2857,99 @@ def _sim_move(planets_raw, raw_fleets, player, src_id, angle, ships, lookahead=2
     raw = [[s['id'],s['owner'],s['x'],s['y'],s['radius'],s['ships'],s['production']]
            for s in state]
     return raw
+
+# ═══════════════════════════════════════════════════════════════════════════
+# VALUE-FUNCTION RE-RANKING (used by all mission scorers)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Maximum multiplicative swing applied by the value function to a mission's score.
+# delta = pw_after - pw_baseline in [-1, +1]; boost = clip(RL_BOOST_GAIN * delta, ±RL_BOOST_CAP)
+RL_BOOST_GAIN = 1.4
+RL_BOOST_CAP  = 0.35
+
+def _ensure_value_state(world):
+    """Lazily build per-turn caches: raw state, baseline P(win), boost cache."""
+    if getattr(world, "_value_state_ready", False):
+        return world._value_pw_baseline
+    world._value_state_ready = True
+
+    is_1v1 = (world.num_players == 2)
+    fn_loaded = (is_1v1 and VALUE_FN_1V1_LOADED) or (not is_1v1 and VALUE_FN_4V4_LOADED)
+    world._value_fn_loaded = fn_loaded
+    world._value_is_1v1    = is_1v1
+    if not fn_loaded:
+        world._value_pw_baseline = None
+        world._boost_cache       = {}
+        return None
+
+    raw_p = [[p.id, p.owner, p.x, p.y, p.radius, p.ships, p.production] for p in world.planets]
+    raw_f = [[f.id, f.owner, f.x, f.y, f.angle, f.from_planet_id, f.ships] for f in world.fleets]
+    world._raw_p_cache = raw_p
+    world._raw_f_cache = raw_f
+    world._boost_cache = {}
+
+    # Baseline: roll the world forward 20 turns with no new commitment from us
+    sim = _sim_move(raw_p, raw_f, world.player, -1, 0.0, 0)
+    if is_1v1:
+        feats = _extract_features(sim, world.player, world.step, fleets_raw=raw_f)
+        pw = value_score_1v1(feats, world.step)
+    else:
+        sim_dicts = [{'id':p[0],'owner':p[1],'x':p[2],'y':p[3],'radius':p[4],'ships':p[5],'production':p[6]} for p in sim]
+        feats = _extract_features_4v4(sim_dicts, world.player, world.step, n_hint=world.num_players, fleets=raw_f)
+        pw = value_score_4v4(feats, world.step)
+    world._value_pw_baseline = pw if pw is not None else 0.5
+    return world._value_pw_baseline
+
+def _value_boost(world, src_id, angle, send_cap):
+    """Multiplicative score adjustment in [1-CAP, 1+CAP] for committing `send_cap` ships from src.
+    Caches sims by (src_id, angle-bucket, ship-bucket) since the simulator is the hot cost."""
+    baseline = _ensure_value_state(world)
+    if baseline is None or not world._value_fn_loaded:
+        return 1.0
+    send_cap = max(0, int(send_cap))
+    if send_cap <= 0:
+        return 1.0
+
+    cache = world._boost_cache
+    # Quantize: 5-ship buckets, 0.1-rad angle buckets — keep cache hit rate high
+    ship_bucket  = max(1, (send_cap // 5) * 5)
+    angle_bucket = round(float(angle) / 0.1) * 0.1
+    key = (src_id, ship_bucket, angle_bucket)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    raw_p = world._raw_p_cache
+    raw_f = world._raw_f_cache
+    sim = _sim_move(raw_p, raw_f, world.player, src_id, angle, send_cap)
+    if world._value_is_1v1:
+        feats = _extract_features(sim, world.player, world.step, fleets_raw=raw_f)
+        pw_after = value_score_1v1(feats, world.step)
+    else:
+        sim_dicts = [{'id':p[0],'owner':p[1],'x':p[2],'y':p[3],'radius':p[4],'ships':p[5],'production':p[6]} for p in sim]
+        feats = _extract_features_4v4(sim_dicts, world.player, world.step, n_hint=world.num_players, fleets=raw_f)
+        pw_after = value_score_4v4(feats, world.step)
+
+    if pw_after is None:
+        cache[key] = 1.0
+        return 1.0
+
+    delta = pw_after - baseline
+    boost = max(-RL_BOOST_CAP, min(RL_BOOST_CAP, RL_BOOST_GAIN * delta))
+    result = 1.0 + boost
+    cache[key] = result
+    return result
+
+def _value_boost_multi(world, options):
+    """Best boost across a set of swarm participants (max-merge)."""
+    if not options:
+        return 1.0
+    best = 1.0
+    for opt in options:
+        b = _value_boost(world, opt.src_id, opt.angle, opt.send_cap)
+        if b > best:
+            best = b
+    return best
 
 # ═══════════════════════════════════════════════════════════════════════════
 # AGENT ENTRY POINT

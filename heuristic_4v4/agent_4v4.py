@@ -139,6 +139,35 @@ def aim_with_prediction(src, target, ships, initial_by_id, ang_vel):
     return final_est[0], final_est[1], tx, ty
 
 
+def fleet_target_planet(fleet, planets):
+    """Project a moving fleet's straight-line path onto every planet and return
+    the first planet it will hit + ETA in turns. Returns (planet, eta) or (None, None).
+    Mirrors the logic in main.py:fleet_target_planet but local to this module."""
+    dir_x = math.cos(fleet.angle)
+    dir_y = math.sin(fleet.angle)
+    speed = fleet_speed(fleet.ships)
+    best_planet = None
+    best_time   = 1e9
+    for p in planets:
+        dx = p.x - fleet.x
+        dy = p.y - fleet.y
+        proj = dx * dir_x + dy * dir_y
+        if proj < 0:
+            continue
+        perp_sq = dx * dx + dy * dy - proj * proj
+        r_sq = p.radius * p.radius
+        if perp_sq >= r_sq:
+            continue
+        hit_d = max(0.0, proj - math.sqrt(max(0.0, r_sq - perp_sq)))
+        turns = hit_d / speed
+        if turns <= HORIZON and turns < best_time:
+            best_time = turns
+            best_planet = p
+    if best_planet is None:
+        return None, None
+    return best_planet, int(math.ceil(best_time))
+
+
 class TacticalQuadrantAgent:
     """Implements defensive tanks, reinforcements, and peacetime buffing."""
     def __init__(self):
@@ -322,6 +351,110 @@ class TacticalQuadrantAgent:
                     self._targeted[tgt.id] = self.current_turn + turns + 2
                 return True
             return False
+
+        # ── Phase 0: Snipe / Interception / Crash exploit ─────────────────
+        # Lifted from 1v1 plan_moves. Runs BEFORE quadrant logic so the highest-
+        # leverage time-sensitive opportunities consume budget first.
+        #
+        # Snipe: an enemy fleet is about to capture a neutral. We arrive in the
+        # same turn (or 1 turn later) with target.ships+1 → we take the planet
+        # after the enemy fleet weakens or wipes the garrison.
+        #
+        # Interception: an enemy fleet is en route to a target we can also reach
+        # but earlier. We grab the planet before they arrive.
+        #
+        # Crash exploit: two non-allied enemy fleets are converging on the same
+        # planet within a small window. After they collide and burn ships, we
+        # arrive with a small force to take what's left.
+        SNIPE_ANCHOR_TOLERANCE = 1   # ±1 turn around enemy ETA counts as snipe
+        CRASH_WINDOW = 2             # |eta_a - eta_b| ≤ 2 for "converging"
+        CRASH_MIN_SHIPS = 10         # combined arriving fleets must be ≥ this
+        CRASH_POST_DELAY = 1         # arrive at crash_turn + 1
+        INTERCEPT_PER_SOURCE_RATIO = 0.85  # don't drain a source dry on interception
+
+        snipe_done = set()
+        for ef in enemy_fleets:
+            ef_fleet = Fleet(*ef)
+            tgt, eta = fleet_target_planet(ef_fleet, planets)
+            if tgt is None or eta is None:
+                continue
+            if tgt.owner == player:
+                continue   # defense path covers this
+            if tgt.id in snipe_done:
+                continue
+
+            # Sources sorted by reachable ETA, prefer closest
+            candidates = []
+            for sp in my_pl:
+                if available_ships.get(sp.id, 0) < (tgt.ships + 2):
+                    continue
+                send_try = min(available_ships[sp.id], tgt.ships + 1)
+                aim = aim_with_prediction(sp, tgt, send_try, self._initial_by_id, ang_vel)
+                if aim is None:
+                    continue
+                _, my_eta, _, _ = aim
+                candidates.append((my_eta, sp, send_try))
+            if not candidates:
+                continue
+            candidates.sort()
+            my_eta, sp, send_try = candidates[0]
+
+            mission = None
+            if my_eta < eta and tgt.owner == -1:
+                mission = "intercept"   # beat them to it
+            elif tgt.owner == -1 and abs(my_eta - eta) <= SNIPE_ANCHOR_TOLERANCE:
+                mission = "snipe"       # arrive about the same time
+            if mission is not None:
+                send_amt = max(tgt.ships + 1, int(send_try * INTERCEPT_PER_SOURCE_RATIO))
+                send_amt = min(send_amt, available_ships[sp.id])
+                if send_amt >= tgt.ships + 1 and aim_and_send(sp, tgt, send_amt):
+                    snipe_done.add(tgt.id)
+
+        # Crash exploit: pair up incoming enemy fleets by target
+        per_target_arrivals = {}
+        for ef in enemy_fleets:
+            ef_fleet = Fleet(*ef)
+            tgt, eta = fleet_target_planet(ef_fleet, planets)
+            if tgt is None or eta is None:
+                continue
+            per_target_arrivals.setdefault(tgt.id, []).append((eta, ef[1], ef[6]))
+
+        for tid, arrivals in per_target_arrivals.items():
+            if tid in snipe_done:
+                continue
+            tgt = next((p for p in planets if p.id == tid), None)
+            if tgt is None or tgt.owner == player:
+                continue
+            arrivals.sort()
+            for i in range(len(arrivals)):
+                eta_a, ow_a, sh_a = arrivals[i]
+                for j in range(i + 1, len(arrivals)):
+                    eta_b, ow_b, sh_b = arrivals[j]
+                    if ow_a == ow_b:
+                        continue
+                    if abs(eta_a - eta_b) > CRASH_WINDOW:
+                        break
+                    if sh_a + sh_b < CRASH_MIN_SHIPS:
+                        continue
+                    desired_arrival = max(eta_a, eta_b) + CRASH_POST_DELAY
+                    # Pick our closest viable source
+                    for sp in sorted(my_pl, key=lambda s: dist(s.x, s.y, tgt.x, tgt.y)):
+                        if available_ships.get(sp.id, 0) < 8:
+                            continue
+                        send_try = min(available_ships[sp.id], max(8, tgt.production * 4 + 4))
+                        aim = aim_with_prediction(sp, tgt, send_try, self._initial_by_id, ang_vel)
+                        if aim is None:
+                            continue
+                        _, my_eta, _, _ = aim
+                        if abs(my_eta - desired_arrival) > CRASH_WINDOW:
+                            continue
+                        if aim_and_send(sp, tgt, send_try):
+                            snipe_done.add(tid)
+                        break
+                    if tid in snipe_done:
+                        break
+                if tid in snipe_done:
+                    break
 
         for mp in my_moving:
             if not my_static:

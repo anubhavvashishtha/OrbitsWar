@@ -109,31 +109,45 @@ def train_replay_td(model, n_epochs: int = TD_EPOCHS, gamma: float = GAMMA):
 
     # ── Pre-build flattened tensors once ─────────────────────────────────────
     # Mid-game pairs: s_t → s_{t+1}  (all non-terminal steps)
-    mid_X_t  = []   # (s_t  features)
-    mid_X_t1 = []   # (s_{t+1} features)
+    mid_X_t   = []   # (s_t  features)
+    mid_X_t1  = []   # (s_{t+1} features)
+    mid_r     = []   # dense in-game reward at step t+1 (event-based)
     # Terminal steps: s_T → won
-    term_X   = []
-    term_won = []
+    term_X    = []
+    term_won  = []
 
     for td in trajectories:
-        traj = td["traj"]          # list of feature vectors
-        won  = td["won"]           # 0.0 or 1.0
-        T    = len(traj)
+        traj   = td["traj"]            # list of feature vectors
+        won    = td["won"]             # 0.0 or 1.0
+        shaped = td.get("shaped")      # list of per-step dense rewards (may be None for legacy cache)
+        T      = len(traj)
         if T < 2:
             continue
         for t in range(T - 1):
             mid_X_t.append(traj[t])
             mid_X_t1.append(traj[t + 1])
+            if shaped is not None and len(shaped) == T:
+                mid_r.append(shaped[t + 1])
+            else:
+                mid_r.append(None)
         term_X.append(traj[T - 1])
         term_won.append(won)
 
     if not mid_X_t:
         print("No valid step pairs — skipping."); return model
 
-    all_X_t   = torch.FloatTensor(mid_X_t)            # (N_mid, 30)
-    all_X_t1  = torch.FloatTensor(mid_X_t1)           # (N_mid, 30)
+    all_X_t    = torch.FloatTensor(mid_X_t)            # (N_mid, 30)
+    all_X_t1   = torch.FloatTensor(mid_X_t1)           # (N_mid, 30)
     all_X_term = torch.FloatTensor(term_X)             # (N_term, 30)
     all_won    = torch.FloatTensor(term_won)           # (N_term,)
+
+    # Pre-stored dense rewards if available (else NaN, then patched per-batch)
+    if all(r is not None for r in mid_r):
+        all_r = torch.FloatTensor(mid_r)
+        _have_dense = True
+    else:
+        all_r = None
+        _have_dense = False
 
     N_mid  = len(all_X_t)
     N_term = len(all_X_term)
@@ -149,8 +163,10 @@ def train_replay_td(model, n_epochs: int = TD_EPOCHS, gamma: float = GAMMA):
         model.train()
 
         # ── Bootstrap targets with shaped reward (frozen for this epoch) ────
-        # Feature indices (extract_features in train_from_replays.py):
-        #   2 = my_planet_share,  4 = my_ship_share,  6 = my_prod_share
+        # Dense reward source:
+        #   - Preferred: per-step event reward stored on the trajectory
+        #     (planet capture, planet loss, opponent elimination, momentum)
+        #   - Fallback: legacy feature-delta shaping when cache lacks 'shaped'
         with torch.no_grad():
             model.eval()
             chunk = 4096
@@ -159,12 +175,15 @@ def train_replay_td(model, n_epochs: int = TD_EPOCHS, gamma: float = GAMMA):
                 V_t1_chunks.append(model.value(all_X_t1[start:start + chunk]))
             V_t1 = torch.cat(V_t1_chunks)                      # (N_mid,)
 
-            d_ships   = all_X_t1[:, 4] - all_X_t[:, 4]        # delta ship share
-            d_prod    = all_X_t1[:, 6] - all_X_t[:, 6]        # delta prod share
-            d_planets = all_X_t1[:, 2] - all_X_t[:, 2]        # delta planet share
-            shaped_r  = 0.1 * (0.4 * d_ships + 0.4 * d_prod + 0.2 * d_planets)
+            if _have_dense:
+                shaped_r = all_r
+            else:
+                d_ships   = all_X_t1[:, 4] - all_X_t[:, 4]
+                d_prod    = all_X_t1[:, 6] - all_X_t[:, 6]
+                d_planets = all_X_t1[:, 2] - all_X_t[:, 2]
+                shaped_r  = 0.1 * (0.4 * d_ships + 0.4 * d_prod + 0.2 * d_planets)
 
-            targets_mid  = shaped_r + gamma * V_t1             # r_t + gamma*V(s_{t+1})
+            targets_mid  = (shaped_r + gamma * V_t1).clamp(0.0, 1.0)
             targets_term = all_won                              # V(s_T) <- won
 
         model.train()
