@@ -12,9 +12,7 @@ What it includes
   records/          — Kaggle replay JSON files (training data)
   enemy agents/     — Enemy bots for vs-bots / RL self-play
   classifier/       — 1v1 GBC training scripts
-  heuristic_4v4/    — 4v4 GBC training scripts + agent
   regressor/        — 1v1 GBR training scripts
-  regressor_4v4/    — 4v4 GBR training scripts
   rl/               — PPO actor-critic training scripts (net, trainer, exporter)
   main.py           — Required by vs-bots scripts and RL self-play
 
@@ -45,9 +43,7 @@ INCLUDE = [
     "records",
     "enemy agents",
     "classifier",
-    "heuristic_4v4",
     "regressor",
-    "regressor_4v4",
     "rl",
     "main.py",
 ]

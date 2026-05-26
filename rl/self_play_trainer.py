@@ -308,7 +308,7 @@ def play_game_collect(model, agent_fns, seed: int = 0):
                 prev_alive = curr_alive
 
                 n_p = max(2, len({p[1] for p in rp if p[1] != -1}))
-                feats = extract_features(sd, 0, step, n_p, fleets=rf)
+                feats = extract_features(sd, 0, step, n_p, fleets=rf)[:30]
                 with torch.no_grad():
                     model.eval()
                     ft               = torch.FloatTensor(feats).unsqueeze(0)

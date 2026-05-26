@@ -75,7 +75,7 @@ def load_data():
 
 
 def to_tensors(records):
-    X = torch.FloatTensor([r['feats'] for r in records])
+    X = torch.FloatTensor([r['feats'][:30] for r in records])
     y = torch.FloatTensor([float(r['won']) for r in records])
     return X, y
 
@@ -124,13 +124,13 @@ def train_replay_td(model, n_epochs: int = TD_EPOCHS, gamma: float = GAMMA):
         if T < 2:
             continue
         for t in range(T - 1):
-            mid_X_t.append(traj[t])
-            mid_X_t1.append(traj[t + 1])
+            mid_X_t.append(traj[t][:30])
+            mid_X_t1.append(traj[t + 1][:30])
             if shaped is not None and len(shaped) == T:
                 mid_r.append(shaped[t + 1])
             else:
                 mid_r.append(None)
-        term_X.append(traj[T - 1])
+        term_X.append(traj[T - 1][:30])
         term_won.append(won)
 
     if not mid_X_t:

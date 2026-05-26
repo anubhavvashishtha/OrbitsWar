@@ -70,13 +70,13 @@ if _clf_dir not in sys.path:
 from train_from_replays import extract_features, snap, split_replay_files
 
 VALUEFN       = str(ROOT / "value_fn_1v1.py")
-TD_CACHE_FILE = str(ROOT / "replay_td_cache.pkl")
+TD_CACHE_FILE = str(ROOT / "replay_td_cache_v3.pkl")
 MODEL_PKL     = str(ROOT / "model.pkl")
 
 TD_SNAPSHOT_EVERY = 1       # every turn — dense transitions for TD
-N_ESTIMATORS      = 600
-MAX_DEPTH         = 5
-LEARNING_RATE     = 0.003
+N_ESTIMATORS      = 1200
+MAX_DEPTH         = 7
+LEARNING_RATE     = 0.005
 
 
 # ── Dense in-game reward constants (must match rl/self_play_trainer.py) ─────
@@ -139,8 +139,7 @@ def _parse_replay_td(rf):
         return []
 
     n_agents  = len(steps[0])
-    if n_agents != 2:           # regressor/ is 1v1 only
-        return []
+
 
     last_step = steps[-1]
     rewards   = [a.get("reward", 0) or 0 for a in last_step]
@@ -192,7 +191,7 @@ def _parse_replay_td(rf):
             result.append({
                 "traj":     traj,
                 "won":      1.0 if i == winner else 0.0,
-                "n_agents": 2,
+                "n_agents": n_agents,
                 "shaped":   shaped_per_player[i],
             })
     return result
@@ -219,7 +218,7 @@ def get_td_trajectories(replay_files=None):
     for i, rf in enumerate(replay_files):
         # v2: trajectory dicts now include a 'shaped' field (per-step event rewards).
         # Old v1 entries silently miss; they get re-parsed and overwritten.
-        cache_key = f"td|v2|{rf}|{os.path.getmtime(rf):.0f}"
+        cache_key = f"td|v3|{rf}|{os.path.getmtime(rf):.0f}"
         if cache_key in cache:
             all_trajectories.extend(cache[cache_key])
             n_cached += 1
@@ -313,6 +312,7 @@ def train_and_export(trajectories, val_trajectories=None,
     try:
         import numpy as np
         from sklearn.ensemble import GradientBoostingRegressor
+        from sklearn.model_selection import train_test_split
         from sklearn.metrics import mean_squared_error
         import joblib
     except ImportError:
@@ -322,6 +322,12 @@ def train_and_export(trajectories, val_trajectories=None,
         print("No trajectories to train on."); return False
 
     warm = base_model is not None
+    base_models = {}
+    if warm:
+        if isinstance(base_model, dict):
+            base_models = base_model
+        else:
+            base_models = {"GLOBAL": base_model}
 
     print("Computing TD regression targets ...")
     train_pairs = _compute_td_values(trajectories, gamma=gamma, reward_scale=reward_scale)
@@ -329,15 +335,17 @@ def train_and_export(trajectories, val_trajectories=None,
 
     X_train = np.array([p[0] for p in train_pairs], dtype=np.float32)
     y_train = np.array([p[1] for p in train_pairs], dtype=np.float32)
+    turns_train = np.round(X_train[:, 0] * 500.0).astype(np.int32)
 
     eps = 1e-6
     logit_train = np.log(np.clip(y_train, eps, 1-eps) / (1 - np.clip(y_train, eps, 1-eps)))
 
-    X_val = y_val = None
+    X_val = y_val = turns_val = None
     if val_trajectories:
         val_pairs = _compute_td_values(val_trajectories, gamma=gamma, reward_scale=reward_scale)
         X_val     = np.array([p[0] for p in val_pairs], dtype=np.float32)
         y_val     = np.array([p[1] for p in val_pairs], dtype=np.float32)
+        turns_val = np.round(X_val[:, 0] * 500.0).astype(np.int32)
 
     print(f"Train: {len(X_train):,} samples")
     print(f"V range: [{y_train.min():.3f}, {y_train.max():.3f}]  mean={y_train.mean():.3f}")
@@ -345,43 +353,84 @@ def train_and_export(trajectories, val_trajectories=None,
     if len(X_train) < 200:
         print(f"Too few samples ({len(X_train)}). Skipping."); return False
 
-    if warm:
-        print(f"\n  GLOBAL  {len(X_train):,} train  (warm-start +{n_extra} trees) ...")
-        reg = base_model
-        reg.set_params(warm_start=True, n_estimators=reg.n_estimators + n_extra)
-    else:
-        print(f"\n  GLOBAL  {len(X_train):,} train  ...")
-        reg = GradientBoostingRegressor(
-            n_estimators=n_estimators, max_depth=max_depth,
-            learning_rate=learning_rate, subsample=0.8,
-            min_samples_leaf=30, random_state=42,
-            loss="squared_error", verbose=1,
-        )
-    reg.fit(X_train, logit_train)
+    def _tr(mask, mask_val, ne, d, base_clf=None):
+        Xs, ys = X_train[mask], logit_train[mask]
+        ys_raw = y_train[mask]
+        if len(Xs) < 80:
+            return None, 0.0, 0.0, 0.0
+        if base_clf is not None:
+            clf = base_clf
+            clf.set_params(warm_start=True, n_estimators=clf.n_estimators + n_extra)
+            clf.fit(Xs, ys)
+            pred_train = 1.0 / (1.0 + np.exp(-clf.predict(Xs)))
+            train_mse = mean_squared_error(ys_raw, pred_train)
+            if X_val is not None and mask_val is not None and mask_val.sum() >= 10:
+                pred_val = 1.0 / (1.0 + np.exp(-clf.predict(X_val[mask_val])))
+                val_mse = mean_squared_error(y_val[mask_val], pred_val)
+                baseline = mean_squared_error(y_val[mask_val], np.full(len(y_val[mask_val]), ys_raw.mean()))
+                imp = 100 * (1 - val_mse / baseline)
+            else:
+                val_mse = train_mse
+                baseline = mean_squared_error(ys_raw, np.full(len(ys_raw), ys_raw.mean()))
+                imp = 100 * (1 - train_mse / baseline)
+        else:
+            Xt,Xv,yt,yv = train_test_split(Xs, ys, test_size=0.2, random_state=42)
+            clf = GradientBoostingRegressor(
+                n_estimators=ne, max_depth=d,
+                learning_rate=learning_rate, subsample=0.8,
+                min_samples_leaf=15, random_state=42,
+                loss="squared_error",
+                validation_fraction=0.1, n_iter_no_change=20, tol=1e-4,
+                verbose=1
+            )
+            clf.fit(Xt, yt)
+            pred_train = 1.0 / (1.0 + np.exp(-clf.predict(Xs)))
+            train_mse = mean_squared_error(ys_raw, pred_train)
+            pred_val = 1.0 / (1.0 + np.exp(-clf.predict(Xv)))
+            yv_raw = 1.0 / (1.0 + np.exp(-yv))
+            val_mse = mean_squared_error(yv_raw, pred_val)
+            baseline = mean_squared_error(yv_raw, np.full(len(yv_raw), yv_raw.mean()))
+            imp = 100 * (1 - val_mse / baseline)
+        return clf, train_mse, val_mse, imp
 
-    if X_val is not None and len(X_val) >= 10:
-        pred_prob = 1.0 / (1.0 + np.exp(-reg.predict(X_val)))
-        val_mse   = mean_squared_error(y_val, pred_prob)
-        baseline  = mean_squared_error(y_val, np.full(len(y_val), y_train.mean()))
-        print(f"val_MSE={val_mse:.4f}  baseline={baseline:.4f}  "
-              f"improve={100*(1-val_mse/baseline):.1f}%")
+    specs = [
+        ("GLOBAL", np.ones(len(X_train), bool),  np.ones(len(X_val), bool) if X_val is not None else None, N_ESTIMATORS, MAX_DEPTH),
+        ("EARLY",  turns_train <= 100,           turns_val <= 100 if X_val is not None else None,          1000,         7),
+        ("LATE",   turns_train >= 300,           turns_val >= 300 if X_val is not None else None,          300,          5),
+        ("MID",    (turns_train > 100) & (turns_train < 300), (turns_val > 100) & (turns_val < 300) if X_val is not None else None, 500, 5),
+    ]
 
-    init_val = float(logit_train.mean())
     lines = ["# AUTO-GENERATED by regressor/train_from_replays.py -- do not edit", ""]
-    lines.append(f"GLOBAL_INIT={init_val:.8f}")
-    lines.append(f"GLOBAL_N_TREES={len(reg.estimators_)}")
-    lines.append("GLOBAL_TREES=[")
-    for ta in reg.estimators_:
-        t  = ta[0].tree_
-        fi = [int(v)                          for v in t.feature]
-        th = [round(float(v), 6)              for v in t.threshold]
-        va = [round(float(t.value[i,0,0]), 8) for i in range(t.node_count)]
-        le = [int(v)                          for v in t.children_left]
-        ri = [int(v)                          for v in t.children_right]
-        lines.append(f"    ({fi},{th},{va},{le},{ri}),")
-    lines.append("]")
-    lines.append("")
-    lines.append("VALUE_FN_MODELS=['GLOBAL']")
+    fitted = {}
+    exported = []
+
+    for name, mask, mask_val, ne, d in specs:
+        print(f"\n  {name:<8} {'(warm-start)' if warm and base_models.get(name) else ''}...")
+        base_clf = base_models.get(name) if warm else None
+        clf, train_mse, val_mse, imp = _tr(mask, mask_val, ne, d, base_clf=base_clf)
+        if clf is None:
+            print("    Skipped (not enough data)")
+            continue
+        print(f"    Train MSE={train_mse:.4f}  Val MSE={val_mse:.4f}  Improve={imp:.1f}%  ({mask.sum()} samples)")
+        
+        init_val = float(logit_train[mask].mean())
+        lines.append(f"{name}_INIT={init_val:.8f}")
+        lines.append(f"{name}_N_TREES={len(clf.estimators_)}")
+        lines.append(f"{name}_TREES=[")
+        for ta in clf.estimators_:
+            t  = ta[0].tree_
+            fi = [int(v)                          for v in t.feature]
+            th = [round(float(v), 6)              for v in t.threshold]
+            va = [round(float(t.value[i,0,0]), 8) for i in range(t.node_count)]
+            le = [int(v)                          for v in t.children_left]
+            ri = [int(v)                          for v in t.children_right]
+            lines.append(f"    ({fi},{th},{va},{le},{ri}),")
+        lines.append("]")
+        lines.append("")
+        exported.append(name)
+        fitted[name] = clf
+
+    lines.append(f"VALUE_FN_MODELS={exported!r}")
     lines.append("VALUE_FN_LOADED=True")
     lines.append("")
 
@@ -391,7 +440,7 @@ def train_and_export(trajectories, val_trajectories=None,
     print(f"\nExported -> {VALUEFN}  ({sz:.1f} KB)")
 
     try:
-        joblib.dump(reg, MODEL_PKL)
+        joblib.dump(fitted, MODEL_PKL)
         print(f"Saved    -> {MODEL_PKL}")
     except Exception as e:
         print(f"[warn] Could not save model.pkl: {e}")
