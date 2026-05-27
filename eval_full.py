@@ -20,9 +20,10 @@ from pathlib import Path
 
 from kaggle_environments import make
 
-ROOT      = Path(__file__).parent
-ENEMY_DIR = ROOT / "enemy agents"
-MY_PATH   = str(ROOT / "main.py")
+ROOT          = Path(__file__).parent
+ENEMY_DIR     = ROOT / "enemy agents"
+MY_PATH       = str(ROOT / "main.py")          # may be overridden by set_agent_mode
+NN_AGENT_PATH = str(ROOT / "imitation" / "agent_nn.py")
 
 # ── Config ──────────────────────────────────────────────────────────────────
 N_4V4   = 1
@@ -133,28 +134,37 @@ def run_match(opponent_paths, seed):
 
 def set_agent_mode(mode):
     """
-    Configure sys.path so main.py loads the correct value functions/agents.
+    Configure sys.path + MY_PATH so the right agent is evaluated.
     Modes:
-      - "classifier": loads value_fn_1v1 from classifier/, value_fn_4v4/agent_4v4 from heuristic_4v4/
-      - "regressor":  loads value_fn_1v1 from regressor/, value_fn_4v4 from regressor_4v4/, agent_4v4 from heuristic_4v4/
+      - "classifier": main.py + value_fn from classifier/, agent_4v4 from heuristic_4v4/
+      - "regressor":  main.py + value_fn from regressor/, regressor_4v4/, heuristic_4v4/
+      - "nn":         imitation/agent_nn.py (EdgeTransformerNet, no main.py dependency)
     """
-    # Remove any existing value_fn/agent directories from sys.path
+    global MY_PATH
+
+    # Remove any existing agent/value-fn directories from sys.path
+    drop_keys = ("classifier", "regressor", "heuristic_4v4", "regressor_4v4", "imitation")
     for path in list(sys.path):
-        if any(k in path for k in ("classifier", "regressor", "heuristic_4v4", "regressor_4v4")):
+        if any(k in path for k in drop_keys):
             try:
                 sys.path.remove(path)
             except ValueError:
                 pass
-            
-    # Add the paths corresponding to the selected mode
+
     if mode == "classifier":
+        MY_PATH = str(ROOT / "main.py")
         sys.path.insert(0, str(ROOT / "classifier"))
         sys.path.insert(0, str(ROOT / "heuristic_4v4"))
     elif mode == "regressor":
+        MY_PATH = str(ROOT / "main.py")
         sys.path.insert(0, str(ROOT / "regressor"))
         sys.path.insert(0, str(ROOT / "regressor_4v4"))
-        sys.path.insert(0, str(ROOT / "heuristic_4v4")) # needed for agent_4v4.py
-        
+        sys.path.insert(0, str(ROOT / "heuristic_4v4"))
+    elif mode == "nn":
+        # agent_nn.py is a self-contained drop-in: exports agent(obs, config)
+        MY_PATH = NN_AGENT_PATH
+        sys.path.insert(0, str(ROOT / "imitation"))
+
     _reload_main()
 
 
@@ -177,10 +187,10 @@ def run_1v1_all_enemies(enemies):
     return {"W": w, "T": t, "L": l, "err": err, "N": len(enemies), "elapsed_s": round(elapsed, 1)}
 
 
-def run_4v4_twenty_matches(enemies):
+def run_4v4_twenty_matches(enemies, n: int = 20):
     w = t = l = err = 0
     t0 = time.time()
-    for i in range(20):
+    for i in range(n):
         seed = abs(hash(("global_4v4", i))) % (2**31)
         random.seed(seed)
         selected_enemies = random.sample(enemies, k=min(3, len(enemies)))
@@ -194,9 +204,9 @@ def run_4v4_twenty_matches(enemies):
             t += 1
         else:
             l += 1
-        print(f"    Match {i+1}/20: W:{w} T:{t} L:{l} E:{err}")
+        print(f"    Match {i+1}/{n}: W:{w} T:{t} L:{l} E:{err}")
     elapsed = time.time() - t0
-    return {"W": w, "T": t, "L": l, "err": err, "N": 20, "elapsed_s": round(elapsed, 1)}
+    return {"W": w, "T": t, "L": l, "err": err, "N": n, "elapsed_s": round(elapsed, 1)}
 
 
 def print_summary_table(all_results):
@@ -222,6 +232,21 @@ def print_summary_table(all_results):
 
 def main():
     global CURRENT_MODE_LABEL
+
+    import argparse as _ap
+    parser = _ap.ArgumentParser(description="Full evaluation against all enemies.")
+    parser.add_argument(
+        "--mode", type=str, default="all",
+        choices=["all", "classifier", "regressor", "nn"],
+        help="Which agent to evaluate: all | classifier | regressor | nn (NeuralNet/Transformer)")
+    parser.add_argument(
+        "--n1v1", type=int, default=N_1V1,
+        help="Matches per enemy in 1v1 (default 1)")
+    parser.add_argument(
+        "--n4v4", type=int, default=20,
+        help="Total 4v4 matches (default 20)")
+    args = parser.parse_args()
+
     enemies = collect_enemies()
     if not enemies:
         print(f"No enemies found under {ENEMY_DIR}"); return
@@ -230,18 +255,26 @@ def main():
     print(f"Loaded {len(enemies)} enemies:")
     for label, _ in enemies:
         print(f"  - {label}")
-    print(f"\nEvaluation Plan:")
-    print(f"  For each agent (Classifier, Regressor):")
-    print(f"    - 4v4: 20 matches against 3 unique random enemies")
-    print(f"    - 1v1: 1 match vs each of the {len(enemies)} enemies")
-    print(f"  Total: {2 * (len(enemies) + 20)} matches\n")
+
+    # ── Build mode list from --mode arg ──────────────────────────────────────
+    all_modes = [
+        ("Classifier", "classifier"),
+        ("Regressor",  "regressor"),
+        ("NeuralNet",  "nn"),
+    ]
+    if args.mode == "all":
+        modes = all_modes
+    else:
+        modes = [(label, mid) for label, mid in all_modes if mid == args.mode]
+
+    n_matches = len(modes) * (len(enemies) * args.n1v1 + args.n4v4)
+    print(f"\nEvaluation Plan: {[m[0] for m in modes]}")
+    print(f"  4v4: {args.n4v4} matches per agent")
+    print(f"  1v1: {args.n1v1} match(es) vs each of {len(enemies)} enemies")
+    print(f"  Total: ~{n_matches} matches\n")
 
     t_start = time.time()
-    all_results = {"Classifier": {}, "Regressor": {}}
-    modes = [
-        ("Classifier", "classifier"),
-        ("Regressor", "regressor")
-    ]
+    all_results = {label: {} for label, _ in modes}
     
     # ── 1. Run all 4v4 matches ──────────────────────────────────────────────
     for mode_name, mode_id in modes:
@@ -252,8 +285,8 @@ def main():
         
         set_agent_mode(mode_id)
         
-        print(f"\n  Running 20 matches of 4v4...")
-        res_4v4 = run_4v4_twenty_matches(enemies)
+        print(f"\n  Running {args.n4v4} matches of 4v4...")
+        res_4v4 = run_4v4_twenty_matches(enemies, n=args.n4v4)
         print(f"  4v4 Summary: W:{res_4v4['W']} T:{res_4v4['T']} L:{res_4v4['L']} E:{res_4v4['err']} "
               f"(WR: {100*res_4v4['W']/res_4v4['N']:.1f}%)")
               

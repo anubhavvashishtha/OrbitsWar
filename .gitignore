@@ -1,11 +1,29 @@
+# ── environments & caches ─────────────────────────────────
 .venv
 .claude
-agents.md
-training_data
 __pycache__
 *.pyc
-simulation
-records
-*.pkl
-*zip
+
+# ── large data files ──────────────────────────────────────
+records/
+training_data/
+simulation/
+imitation/dataset.npz
+kaggle_upload/
+
+# ── model weights & checkpoints ───────────────────────────
 *.pt
+*.pkl
+*.onnx
+*.safetensors
+
+# ── zips & archives ───────────────────────────────────────
+*.zip
+*.tar.gz
+*.tar
+
+# ── logs ─────────────────────────────────────────────────
+*.log
+
+# ── misc ─────────────────────────────────────────────────
+agents.md
