@@ -447,8 +447,9 @@ def append_dataset(replay_dir: str, out_path: str,
                 fail += 1
                 if fail <= 5:
                     print(f"  ERROR {fpath.name}: {e}")
-            if (local_i + 1) % 50 == 0:
-                print(f"  [{local_i+1}/{len(new_files)}] ok={ok} fail={fail}")
+            if (local_i + 1) % 100 == 0:
+                print(f"  [{local_i+1}/{len(new_files)}] ok={ok} fail={fail} "
+                      f"1v1={n2_games} 4p={n4_games}")
     else:
         args_list = [(fpath, neg_ratio, i) for i, fpath in enumerate(new_files)]
         with ProcessPoolExecutor(max_workers=workers) as ex:
@@ -466,8 +467,9 @@ def append_dataset(replay_dir: str, out_path: str,
                     ok += 1
                     if result[4] == 2: n2_games += 1
                     else:              n4_games += 1
-                if done_count % 50 == 0:
-                    print(f"  [{done_count}/{len(new_files)}] ok={ok} fail={fail}")
+                if done_count % 100 == 0:
+                    print(f"  [{done_count}/{len(new_files)}] ok={ok} fail={fail} "
+                          f"1v1={n2_games} 4p={n4_games}")
 
     if not new_results:
         print("No valid new replays extracted.")
