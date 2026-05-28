@@ -35,7 +35,7 @@ Usage
     python rl/self_play_trainer.py
     python rl/self_play_trainer.py --rounds 20 --games 12
 """
-import os, sys, glob, random, importlib.util, argparse
+import os, sys, glob, random, importlib.util, argparse, math
 from pathlib import Path
 
 import torch
@@ -64,10 +64,14 @@ GAMMA           = 0.99
 GAE_LAMBDA      = 0.95
 CLIP_EPS        = 0.2
 VAL_COEF        = 0.5
-ENT_COEF        = 0.05
 PPO_EPOCHS      = 4
 BATCH_SIZE      = 256
 SNAPSHOT_EVERY  = 1      # capture every turn (TODO #4 — dense transitions)
+
+# SAC-style adaptive entropy — replaces fixed ENT_COEF
+# log(N_ACTIONS) * 0.4 ≈ 0.72 nats keeps reasonable intent diversity
+TARGET_ENTROPY  = math.log(6) * 0.4
+ALPHA_LR        = 3e-4
 
 # ── Intent names (for logging) ────────────────────────────────────────────────
 INTENT_NAMES = [
@@ -355,10 +359,14 @@ def play_game_collect(model, agent_fns, seed: int = 0):
 
 
 # ── PPO update ────────────────────────────────────────────────────────────────
-def ppo_update(model, optimizer, buf: RolloutBuffer):
-    """PPO clip loss over one rollout buffer (one game's worth of data)."""
+def ppo_update(model, optimizer, buf: RolloutBuffer,
+               log_alpha=None, alpha_optimizer=None):
+    """
+    PPO clip loss over one rollout buffer (one game's worth of data).
+    log_alpha / alpha_optimizer: SAC-style adaptive entropy temperature.
+    """
     if len(buf) < 2:
-        return 0.0
+        return 0.0, 0.0
 
     states, actions, old_log_probs, returns, advantages = buf.as_arrays()
 
@@ -370,10 +378,10 @@ def ppo_update(model, optimizer, buf: RolloutBuffer):
     # Normalise advantages for stable training
     Adv  = (Adv - Adv.mean()) / (Adv.std() + 1e-8)
 
-    idx_list   = list(range(len(X)))
-    total_loss = 0.0
+    idx_list      = list(range(len(X)))
+    total_loss    = 0.0
     total_entropy = 0.0
-    n_updates  = 0
+    n_updates     = 0
 
     model.train()
     for _ in range(PPO_EPOCHS):
@@ -387,6 +395,9 @@ def ppo_update(model, optimizer, buf: RolloutBuffer):
             new_log_p  = dist.log_prob(A[batch])
             entropy    = dist.entropy().mean()
 
+            # Current temperature — detach so alpha grad is separate
+            alpha = log_alpha.exp().detach() if log_alpha is not None else 0.05
+
             ratio   = torch.exp(new_log_p - oldp[batch])
             adv_b   = Adv[batch]
             L_clip  = torch.min(
@@ -394,16 +405,23 @@ def ppo_update(model, optimizer, buf: RolloutBuffer):
                 torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * adv_b
             ).mean()
             L_val   = F.mse_loss(values, R[batch])
-            loss    = -L_clip + VAL_COEF * L_val - ENT_COEF * entropy
+            loss    = -L_clip + VAL_COEF * L_val - alpha * entropy
 
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
 
-            total_loss += loss.item()
+            # Alpha update: push entropy toward TARGET_ENTROPY
+            if log_alpha is not None and alpha_optimizer is not None:
+                alpha_loss = -(log_alpha * (entropy.detach() - TARGET_ENTROPY))
+                alpha_optimizer.zero_grad()
+                alpha_loss.backward()
+                alpha_optimizer.step()
+
+            total_loss    += loss.item()
             total_entropy += entropy.item()
-            n_updates  += 1
+            n_updates     += 1
 
     return total_loss / max(1, n_updates), total_entropy / max(1, n_updates)
 
@@ -444,7 +462,25 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
         else:
             print("No last.pt or model.pt found — starting from random weights.")
 
-    optimizer = optim.Adam(model.parameters(), lr=LR)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"OrbitsNet params: {total_params:,}")
+
+    optimizer      = optim.Adam(model.parameters(), lr=LR)
+
+    # SAC-style adaptive entropy temperature
+    log_alpha      = nn.Parameter(torch.tensor(math.log(0.05)))
+    alpha_optimizer = optim.Adam([log_alpha], lr=ALPHA_LR)
+
+    # Restore log_alpha from checkpoint if available
+    _la_path = MODEL_PATH if MODEL_PATH.exists() else BEST_MODEL_PATH
+    if _la_path.exists():
+        try:
+            _ckpt = torch.load(_la_path, weights_only=False)
+            if isinstance(_ckpt, dict) and "log_alpha" in _ckpt:
+                log_alpha.data.fill_(_ckpt["log_alpha"])
+                print(f"  Restored alpha={log_alpha.exp().item():.4f} from checkpoint")
+        except Exception:
+            pass
 
     my_fn, my_name = load_agent(str(MAIN_PY), force=True)
 
@@ -468,6 +504,7 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
 
     print(f"\nPPO self-play: {n_rounds} rounds × {games_per_round} games")
     print(f"Intents: {', '.join(f'{i}={n}' for i, n in enumerate(INTENT_NAMES))}")
+    print(f"Adaptive entropy: target={TARGET_ENTROPY:.3f} nats, init_alpha={log_alpha.exp().item():.4f}")
     print("=" * 60)
 
     no_improve = 0
@@ -493,7 +530,7 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
             for a in buf.actions:
                 intent_counts[a] += 1
 
-            loss, entropy = ppo_update(model, optimizer, buf)
+            loss, entropy = ppo_update(model, optimizer, buf, log_alpha, alpha_optimizer)
             round_loss += loss
             round_entropy += entropy
             buf.clear()
@@ -524,11 +561,13 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
         else:
             intent_pct = "no steps"
 
+        alpha_val = log_alpha.exp().item()
         checkpoint_data = {
             "epoch": rnd,
             "best_wr": max(wr, best_wr),
             "loss": avg_loss,
             "entropy": avg_entropy,
+            "log_alpha": log_alpha.item(),
             "state_dict": model.state_dict()
         }
         
@@ -545,7 +584,7 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
             # We explicitly do NOT reload the best model here, as it traps the RL 
             # agent in high-variance local minima and prevents exploration.
 
-        print(f"\n  -> WR={wr:.1%}  avg_ppo_loss={avg_loss:.4f}  avg_ent={avg_entropy:.4f}{tag}")
+        print(f"\n  -> WR={wr:.1%}  avg_ppo_loss={avg_loss:.4f}  avg_ent={avg_entropy:.4f}  alpha={alpha_val:.4f}{tag}")
         print(f"     intents: {intent_pct}")
 
     print(f"\nPPO self-play complete.  Best WR={best_wr:.1%}")
@@ -556,6 +595,7 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
             "best_wr": best_wr,
             "loss": avg_loss,
             "entropy": avg_entropy,
+            "log_alpha": log_alpha.item(),
             "state_dict": model.state_dict()
         }, MODEL_PATH)
         print(f"  Final last.pt ← best checkpoint ({best_wr:.1%})")

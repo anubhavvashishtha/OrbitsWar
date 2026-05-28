@@ -1,7 +1,7 @@
 """
 rl/transformer_trainer.py
 =========================
-PPO fine-tuning for EdgeTransformerNet (actor) + ValueNet (critic).
+PPO fine-tuning for EdgeTransformerNet (actor) + TransformerCritic (critic).
 
 Unlike self_play_trainer.py (which picks one of 6 abstract intents via a
 small MLP), this trainer lets the EdgeTransformerNet directly score every
@@ -14,8 +14,8 @@ Actor  : EdgeTransformerNet   (imitation/model.py)
          Output: per-edge logits → Categorical → sample primary edge
          Pretrained from: imitation/checkpoints/best_model.pt
 
-Critic : ValueNet              (small MLP, defined below)
-         Input : 30-dim global board features
+Critic : TransformerCritic     (lightweight transformer on edge features)
+         Input : (E, 81) edge feature matrix — same as actor
          Output: scalar V(s)  (no Sigmoid — unbounded for proper GAE)
          Warm-started from: rl/last.pt OrbitsNet trunk weights (if available)
 
@@ -102,65 +102,65 @@ ENT_COEF_MAX    = 0.20    # ceiling — never let entropy dominate the loss
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# VALUE NETWORK  (no Sigmoid — proper unbounded value for GAE)
+# CRITIC  — Transformer on the same (E, 81) edge features as the actor
 # ════════════════════════════════════════════════════════════════════════════
 
-class ValueNet(nn.Module):
+class TransformerCritic(nn.Module):
     """
-    Small MLP critic: 30-dim global features → scalar V(s).
-    No Sigmoid: returns are unbounded (GAE can go negative).
+    Lightweight transformer critic that consumes the same (E, 81) edge
+    feature matrix the actor already builds each turn.
+
+    Architecture  (d_model=64, 2 encoder layers):
+      4 component projectors  31/18/18/14 → 64 each
+      fuse                    256 → 64
+      TransformerEncoder      2 × (MHA + FFN)  d=64, heads=4, ffn=256
+      mean-pool over edges    → (B, 64)
+      value head              Linear(64,32) → ReLU → Linear(32,1)
+
+    No Sigmoid — V(s) is unbounded so GAE can go negative.
     """
-    def __init__(self, in_dim: int = 30, hidden: int = 128):
+    _D = 64
+
+    def __init__(self):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden),
-            nn.LayerNorm(hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, hidden // 2),
-            nn.ReLU(),
-            nn.Linear(hidden // 2, 1),
+        D = self._D
+        self.global_proj = nn.Sequential(nn.Linear(31, D), nn.LayerNorm(D), nn.GELU())
+        self.src_proj    = nn.Sequential(nn.Linear(18, D), nn.LayerNorm(D), nn.GELU())
+        self.tgt_proj    = nn.Sequential(nn.Linear(18, D), nn.LayerNorm(D), nn.GELU())
+        self.edge_proj   = nn.Sequential(nn.Linear(14, D), nn.LayerNorm(D), nn.GELU())
+        self.fuse        = nn.Sequential(nn.Linear(4 * D, D), nn.LayerNorm(D), nn.GELU())
+
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=D, nhead=4, dim_feedforward=D * 4,
+            dropout=0.1, batch_first=True, norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(
+            enc_layer, num_layers=2, enable_nested_tensor=False)
+
+        self.value_head = nn.Sequential(
+            nn.Linear(D, D // 2), nn.ReLU(), nn.Linear(D // 2, 1)
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x).squeeze(-1)   # (B,)
+    def forward(self, x: torch.Tensor, pad_mask=None) -> torch.Tensor:
+        """
+        x        : (B, E, 81)  or (1, E, 81) for a single turn
+        pad_mask : (B, E) bool — True = padding, excluded from mean-pool
+        Returns  : (B,) scalar values
+        """
+        g = self.global_proj(x[..., :31])
+        s = self.src_proj(x[..., 31:49])
+        t = self.tgt_proj(x[..., 49:67])
+        e = self.edge_proj(x[..., 67:81])
+        h = self.fuse(torch.cat([g, s, t, e], dim=-1))          # (B, E, D)
+        h = self.transformer(h, src_key_padding_mask=pad_mask)   # (B, E, D)
 
+        if pad_mask is not None:
+            real  = (~pad_mask).unsqueeze(-1).float()            # (B, E, 1)
+            h_mean = (h * real).sum(1) / real.sum(1).clamp(min=1)
+        else:
+            h_mean = h.mean(1)                                   # (B, D)
 
-def _warm_start_critic(critic: ValueNet, orbits_ckpt_path: str) -> bool:
-    """
-    Copy the shared trunk weights from OrbitsNet into ValueNet's first layer
-    as a warm-start.  Skips silently if shapes don't match.
-    """
-    try:
-        ckpt = torch.load(orbits_ckpt_path, map_location="cpu", weights_only=False)
-        sd   = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
-        # OrbitsNet layout  →  ValueNet layout
-        #   trunk.0 : Linear(30,128)   →  net.0 : Linear(30,128)
-        #   trunk.1 : LayerNorm(128)   →  net.1 : LayerNorm(128)
-        #   trunk.4 : Linear(128,64)   →  net.3 : Linear(128,64)
-        #   value_head.0 : Linear(64,1)→  net.5 : Linear(64,1)
-        # All 4 layers have matching shapes — copy the full value function.
-        mapping = {
-            "net.0.weight": "trunk.0.weight",
-            "net.0.bias":   "trunk.0.bias",
-            "net.1.weight": "trunk.1.weight",
-            "net.1.bias":   "trunk.1.bias",
-            "net.3.weight": "trunk.4.weight",       # Linear(128, 64)
-            "net.3.bias":   "trunk.4.bias",
-            "net.5.weight": "value_head.0.weight",  # Linear(64, 1)
-            "net.5.bias":   "value_head.0.bias",
-        }
-        loaded = 0
-        for dst_key, src_key in mapping.items():
-            if src_key in sd and sd[src_key].shape == critic.state_dict()[dst_key].shape:
-                critic.state_dict()[dst_key].copy_(sd[src_key])
-                loaded += 1
-        if loaded:
-            print(f"  Critic warm-start: {loaded}/8 layers copied from OrbitsNet "
-                  f"(full value function transferred).")
-        return True
-    except Exception as e:
-        print(f"  Critic warm-start skipped ({e})")
-        return False
+        return self.value_head(h_mean).squeeze(-1)               # (B,)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -188,24 +188,21 @@ class TransformerRolloutBuffer:
         self.clear()
 
     def clear(self):
-        self.turn_feats   = []   # (E_i, 81) numpy arrays
-        self.chosen_idxs  = []   # int
-        self.log_probs    = []   # float
-        self.rewards      = []   # float
-        self.dones        = []   # float  0/1
-        self.values       = []   # float  V(s)
-        self.global_feats = []   # (30,) numpy arrays (for critic)
+        self.turn_feats  = []   # (E_i, 81) numpy arrays — shared by actor & critic
+        self.chosen_idxs = []   # int
+        self.log_probs   = []   # float
+        self.rewards     = []   # float
+        self.dones       = []   # float  0/1
+        self.values      = []   # float  V(s)
 
     def add(self, turn_feats: np.ndarray, chosen_idx: int,
-            log_prob: float, reward: float, done: bool,
-            value: float, global_feats: np.ndarray):
+            log_prob: float, reward: float, done: bool, value: float):
         self.turn_feats.append(turn_feats.astype(np.float32))
         self.chosen_idxs.append(int(chosen_idx))
         self.log_probs.append(float(log_prob))
         self.rewards.append(float(reward))
         self.dones.append(float(done))
         self.values.append(float(value))
-        self.global_feats.append(global_feats.astype(np.float32))
 
     def compute_gae(self, last_value: float = 0.0):
         advantages, returns = [], []
@@ -300,7 +297,7 @@ def _build_moves(obs: dict, actor: EdgeTransformerNet, device: str):
 
 
 def play_game_collect(actor: EdgeTransformerNet,
-                      critic: ValueNet,
+                      critic: TransformerCritic,
                       agent_fns: list,
                       seed: int,
                       device: str):
@@ -308,7 +305,6 @@ def play_game_collect(actor: EdgeTransformerNet,
     Play one FFA game.  Player 0 uses the actor to pick and execute edges.
     Returns (TransformerRolloutBuffer, outcome_str).
     """
-    from train_from_replays import extract_features
     from kaggle_environments import make
 
     n   = len(agent_fns)
@@ -336,7 +332,6 @@ def play_game_collect(actor: EdgeTransformerNet,
         p0_moves   = []
         store_this = False
         turn_feats = chosen_idx = log_prob_val = value_val = None
-        global_feats_arr = np.zeros(30, dtype=np.float32)
         shaped_r = 0.0
 
         if obss[0] is not None:
@@ -355,29 +350,24 @@ def play_game_collect(actor: EdgeTransformerNet,
                 prev_sd    = sd
                 prev_alive = curr_alive
 
-                # 30-dim global features for critic
-                n_p = max(2, len({p[1] for p in rp if p[1] != -1}))
-                global_feats_arr = np.array(
-                    extract_features(sd, 0, step, n_p, fleets=rf)[:30],
-                    dtype=np.float32)
-
-                # Critic value estimate
-                with torch.no_grad():
-                    critic.eval()
-                    gf_t      = torch.from_numpy(global_feats_arr).unsqueeze(0).to(device)
-                    value_val = float(critic(gf_t).item())
-
                 # Actor: score edges, sample primary, build moves
                 turn_feats, chosen_idx, log_prob_val, p0_moves = \
                     _build_moves(obss[0], actor, device)
 
+                # Critic: estimate V(s) from same edge features
                 if turn_feats is not None:
+                    with torch.no_grad():
+                        critic.eval()
+                        tf_t      = torch.from_numpy(turn_feats).unsqueeze(0).to(device)
+                        value_val = float(critic(tf_t).item())
                     store_this = True
+                else:
+                    value_val = 0.0
 
         # ── Store transition (shaped reward from this step) ────────────────
         if store_this:
             buf.add(turn_feats, chosen_idx, log_prob_val,
-                    shaped_r, False, value_val, global_feats_arr)
+                    shaped_r, False, value_val)
 
         # ── Execute all agents ─────────────────────────────────────────────
         actions = [p0_moves]
@@ -407,7 +397,7 @@ def play_game_collect(actor: EdgeTransformerNet,
 # ════════════════════════════════════════════════════════════════════════════
 
 def ppo_update(actor: EdgeTransformerNet,
-               critic: ValueNet,
+               critic: TransformerCritic,
                optimizer: optim.Optimizer,
                log_alpha: nn.Parameter,
                alpha_optimizer: optim.Optimizer,
@@ -434,21 +424,19 @@ def ppo_update(actor: EdgeTransformerNet,
     all_oldp = []
     all_ret  = []
     all_adv  = []
-    all_gf   = []
 
     for buf in bufs:
         if len(buf) < 2:
             continue
         rets, advs = buf.compute_gae(last_value=0.0)
-        for tf, ci, op, ret, adv, gf in zip(
+        for tf, ci, op, ret, adv in zip(
                 buf.turn_feats, buf.chosen_idxs, buf.log_probs,
-                rets, advs, buf.global_feats):
+                rets, advs):
             all_tf.append(tf)
             all_ci.append(ci)
             all_oldp.append(op)
             all_ret.append(ret)
             all_adv.append(adv)
-            all_gf.append(gf)
 
     if not all_tf:
         return 0.0, 0.0, 0.0
@@ -458,8 +446,6 @@ def ppo_update(actor: EdgeTransformerNet,
     returns = torch.FloatTensor(all_ret).to(device)
     adv_all = torch.FloatTensor(all_adv).to(device)
     adv_all = (adv_all - adv_all.mean()) / (adv_all.std() + 1e-8)
-
-    gf_tensor = torch.FloatTensor(np.stack(all_gf)).to(device)  # (N, 30)
 
     total_loss = total_ent = total_alpha = 0.0
     n_updates  = 0
@@ -474,26 +460,25 @@ def ppo_update(actor: EdgeTransformerNet,
             batch = idxs[start:start + MINI_BATCH]
 
             # ── per-turn forward (variable E — cannot stack) ───────────────
-            new_log_ps = []
-            entropies  = []
+            new_log_ps  = []
+            entropies   = []
+            values_list = []
             for b in batch:
-                tf = torch.from_numpy(all_tf[b]).unsqueeze(0).to(device)
+                tf = torch.from_numpy(all_tf[b]).unsqueeze(0).to(device)   # (1, E, 81)
                 al, _ = actor(tf, pad_mask=None)
-                logits = al.squeeze(0).squeeze(-1)                # (E,)
+                logits = al.squeeze(0).squeeze(-1)                          # (E,)
                 dist   = torch.distributions.Categorical(logits=logits)
                 ci     = torch.tensor(all_ci[b], device=device)
                 new_log_ps.append(dist.log_prob(ci))
                 entropies.append(dist.entropy())
+                values_list.append(critic(tf).squeeze(0))                   # scalar
 
             new_lp  = torch.stack(new_log_ps)        # (batch,)
             entropy = torch.stack(entropies).mean()   # scalar
+            values  = torch.stack(values_list)        # (batch,)
 
             # ── current alpha (clamped for stability) ──────────────────────
             alpha = log_alpha.exp().clamp(ENT_COEF_MIN, ENT_COEF_MAX)
-
-            # ── critic value ───────────────────────────────────────────────
-            gf_b   = gf_tensor[batch]
-            values = critic(gf_b)
 
             # ── PPO clip loss ──────────────────────────────────────────────
             ratio  = torch.exp(new_lp - old_lp[batch])
@@ -538,11 +523,11 @@ def ppo_update(actor: EdgeTransformerNet,
 # MAIN TRAINING LOOP
 # ════════════════════════════════════════════════════════════════════════════
 
-def train(n_rounds:        int = N_ROUNDS,
-          games_per_round: int = GAMES_PER_ROUND,
-          actor_path:      str = str(DEFAULT_ACTOR_PATH),
-          critic_path:     str = str(DEFAULT_CRITIC_PATH),
-          device:          str = "auto"):
+def train(n_rounds:        int  = N_ROUNDS,
+          games_per_round: int  = GAMES_PER_ROUND,
+          actor_path:      str  = str(DEFAULT_ACTOR_PATH),
+          critic_path:     str  = str(DEFAULT_CRITIC_PATH),
+          device:          str  = "auto"):
 
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -560,11 +545,8 @@ def train(n_rounds:        int = N_ROUNDS,
         print("  Using random-initialized actor.")
 
     # ── Load critic ────────────────────────────────────────────────────────
-    critic = ValueNet().to(device)
-    if Path(critic_path).exists():
-        _warm_start_critic(critic, critic_path)
-    else:
-        print(f"  No OrbitsNet checkpoint at {critic_path} — critic starts fresh.")
+    critic = TransformerCritic().to(device)
+    print("  Critic: TransformerCritic (d=64, 2 layers) — starts fresh.")
 
     # ── Adaptive entropy coefficient (SAC-style) ──────────────────────────
     # log_alpha is a learnable scalar; alpha = exp(log_alpha) acts as ENT_COEF
@@ -674,7 +656,7 @@ def train(n_rounds:        int = N_ROUNDS,
             )
             sys.stdout.flush()
 
-        # ── Single PPO update on all games from this round ─────────────────
+        # ── PPO update on all games from this round ────────────────────────
         avg_loss, avg_ent, avg_alpha = ppo_update(
             actor, critic, optimizer,
             log_alpha, alpha_optimizer,
@@ -720,11 +702,11 @@ def train(n_rounds:        int = N_ROUNDS,
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="PPO fine-tuning of EdgeTransformerNet")
-    p.add_argument("--rounds", type=int,  default=N_ROUNDS)
-    p.add_argument("--games",  type=int,  default=GAMES_PER_ROUND)
-    p.add_argument("--actor",  type=str,  default=str(DEFAULT_ACTOR_PATH))
-    p.add_argument("--critic", type=str,  default=str(DEFAULT_CRITIC_PATH))
-    p.add_argument("--device", type=str,  default="auto")
+    p.add_argument("--rounds",   type=int,  default=N_ROUNDS)
+    p.add_argument("--games",    type=int,  default=GAMES_PER_ROUND)
+    p.add_argument("--actor",    type=str,  default=str(DEFAULT_ACTOR_PATH))
+    p.add_argument("--critic",   type=str,  default=str(DEFAULT_CRITIC_PATH))
+    p.add_argument("--device",   type=str,  default="auto")
     args = p.parse_args()
 
     train(

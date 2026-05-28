@@ -42,7 +42,7 @@ import sys
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Set
 
 import numpy as np
 
@@ -56,6 +56,10 @@ from features import (
 # ── project-level defaults ────────────────────────────────────────────────────
 RECORDS_DIR  = Path(__file__).parent.parent / "records"   # C:\projects\OrbitsWar\records
 DATASET_PATH = Path(__file__).parent / "dataset.npz"      # imitation/dataset.npz
+
+
+def _meta_path(out_path: Path) -> Path:
+    return out_path.with_name(out_path.stem + "_meta.json")
 
 # ── target resolution ──────────────────────────────────────────────────────
 
@@ -232,12 +236,21 @@ def _worker(args):
 def extract_dataset(replay_dir: str, out_path: str,
                     neg_ratio: int = 3,
                     max_replays: Optional[int] = None,
-                    workers: int = 1):
-
+                    workers: int = 1,
+                    files_subset: Optional[List[Path]] = None,
+                    replay_idx_offset: int = 0):
+    """
+    files_subset: if given, process only these files (used by append_dataset).
+    replay_idx_offset: added to each file's replay index (for append mode).
+    Returns list of processed filenames (basenames) on success, else None.
+    """
     replay_dir = Path(replay_dir)
-    files = sorted(replay_dir.glob('*.json'))
-    if max_replays:
-        files = files[:max_replays]
+    if files_subset is not None:
+        files = files_subset
+    else:
+        files = sorted(replay_dir.glob('*.json'))
+        if max_replays:
+            files = files[:max_replays]
 
     print(f"Found {len(files)} replay files in {replay_dir}")
     print(f"neg_ratio={neg_ratio}, workers={workers}")
@@ -311,7 +324,7 @@ def extract_dataset(replay_dir: str, out_path: str,
         all_y_act.append(y_act)
         all_y_frac.append(y_frac)
         all_step.append(step_arr)
-        all_replay.append(np.full(n, i,         dtype=np.int32))
+        all_replay.append(np.full(n, replay_idx_offset + i, dtype=np.int32))
         all_n_players.append(np.full(n, n_ag,   dtype=np.int8))
         all_winner.append(np.full(n, winner_id, dtype=np.int8))
 
@@ -345,6 +358,175 @@ def extract_dataset(replay_dir: str, out_path: str,
         winner=winner_arr,
     )
     print(f"Saved to {out_path}  ({out_path.stat().st_size / 1e6:.1f} MB)")
+
+    processed_names = [Path(f).name for f in files]
+    meta = {
+        "processed_files": processed_names,
+        "next_replay_idx": replay_idx_offset + len(files),
+    }
+    with open(_meta_path(out_path), 'w') as mf:
+        json.dump(meta, mf, indent=2)
+    print(f"Metadata saved to {_meta_path(out_path)}")
+    return processed_names
+
+
+# ── incremental append ────────────────────────────────────────────────────
+
+def append_dataset(replay_dir: str, out_path: str,
+                   neg_ratio: int = 3,
+                   workers: int = 1):
+    """
+    Only process replay files not already in dataset.npz, then concatenate.
+    Requires dataset_meta.json to exist alongside dataset.npz.
+    """
+    out_path  = Path(out_path)
+    meta_path = _meta_path(out_path)
+
+    if not out_path.exists():
+        print("No existing dataset found — running full extraction instead.")
+        extract_dataset(replay_dir, str(out_path), neg_ratio, workers=workers)
+        return
+
+    if not meta_path.exists():
+        # No metadata — use file modification date to split old vs new.
+        # Files NOT modified today are assumed already in the dataset.
+        from datetime import date
+        today = date.today()
+        all_files_sorted = sorted(Path(replay_dir).glob('*.json'))
+        old_files = [f for f in all_files_sorted
+                     if date.fromtimestamp(f.stat().st_mtime) != today]
+        inferred_meta = {
+            "processed_files": [f.name for f in old_files],
+            "next_replay_idx": len(old_files),
+        }
+        with open(meta_path, 'w') as mf:
+            json.dump(inferred_meta, mf, indent=2)
+        n_new = len(all_files_sorted) - len(old_files)
+        print(f"No metadata found — inferred from file dates:")
+        print(f"  Already processed (not today): {len(old_files)}")
+        print(f"  New files (modified today):    {n_new}")
+        print(f"Metadata written to {meta_path}")
+        with open(meta_path) as mf:
+            meta = json.load(mf)
+
+    with open(meta_path) as mf:
+        meta = json.load(mf)
+
+    already_done: Set[str] = set(meta["processed_files"])
+    next_idx: int          = meta["next_replay_idx"]
+
+    replay_dir = Path(replay_dir)
+    all_files  = sorted(replay_dir.glob('*.json'))
+    new_files  = [f for f in all_files if f.name not in already_done]
+
+    if not new_files:
+        print("No new replay files found — dataset is already up to date.")
+        return
+
+    print(f"Existing dataset : {len(already_done)} replays, {next_idx} replay-index slots")
+    print(f"New files found  : {len(new_files)}")
+
+    # Extract only the new files, starting replay indices from next_idx
+    new_results = {}
+    ok = fail = 0
+    n2_games = n4_games = 0
+
+    if workers <= 1:
+        rng = np.random.default_rng(next_idx)
+        for local_i, fpath in enumerate(new_files):
+            try:
+                result = extract_replay(str(fpath), neg_ratio, rng)
+                new_results[local_i] = result
+                if result[0].shape[0] == 0:
+                    fail += 1
+                else:
+                    ok += 1
+                    if result[4] == 2: n2_games += 1
+                    else:              n4_games += 1
+            except Exception as e:
+                fail += 1
+                if fail <= 5:
+                    print(f"  ERROR {fpath.name}: {e}")
+            if (local_i + 1) % 50 == 0:
+                print(f"  [{local_i+1}/{len(new_files)}] ok={ok} fail={fail}")
+    else:
+        args_list = [(fpath, neg_ratio, i) for i, fpath in enumerate(new_files)]
+        with ProcessPoolExecutor(max_workers=workers) as ex:
+            futures = {ex.submit(_worker, a): a[2] for a in args_list}
+            done_count = 0
+            for fut in as_completed(futures):
+                local_i, result, err = fut.result()
+                done_count += 1
+                if err or result is None or result[0].shape[0] == 0:
+                    fail += 1
+                    if fail <= 5 and err:
+                        print(f"  ERROR file {local_i}: {err}")
+                else:
+                    new_results[local_i] = result
+                    ok += 1
+                    if result[4] == 2: n2_games += 1
+                    else:              n4_games += 1
+                if done_count % 50 == 0:
+                    print(f"  [{done_count}/{len(new_files)}] ok={ok} fail={fail}")
+
+    if not new_results:
+        print("No valid new replays extracted.")
+        return
+
+    # Build arrays for new data
+    new_X, new_y_act, new_y_frac = [], [], []
+    new_step, new_replay, new_n_players, new_winner = [], [], [], []
+
+    for local_i in sorted(new_results):
+        X_r, y_act, y_frac, step_arr, n_ag, winner_id = new_results[local_i]
+        if X_r.shape[0] == 0:
+            continue
+        n = len(y_act)
+        new_X.append(X_r)
+        new_y_act.append(y_act)
+        new_y_frac.append(y_frac)
+        new_step.append(step_arr)
+        new_replay.append(np.full(n, next_idx + local_i, dtype=np.int32))
+        new_n_players.append(np.full(n, n_ag,            dtype=np.int8))
+        new_winner.append(np.full(n, winner_id,          dtype=np.int8))
+
+    # Load existing dataset and concatenate
+    existing = np.load(out_path)
+    print(f"\nExisting samples : {existing['X'].shape[0]:,}")
+    print(f"New samples      : {sum(a.shape[0] for a in new_X):,}")
+
+    X          = np.concatenate([existing['X']]          + new_X,         axis=0)
+    y_action   = np.concatenate([existing['y_action']]   + new_y_act,     axis=0)
+    y_fraction = np.concatenate([existing['y_fraction']] + new_y_frac,    axis=0)
+    step_arr   = np.concatenate([existing['step']]       + new_step,      axis=0)
+    replay_arr = np.concatenate([existing['replay']]     + new_replay,    axis=0)
+    n_players  = np.concatenate([existing['n_players']]  + new_n_players, axis=0)
+    winner_arr = np.concatenate([existing['winner']]     + new_winner,    axis=0)
+
+    print(f"Total samples    : {X.shape[0]:,}")
+
+    bad = ~np.isfinite(X)
+    if bad.any():
+        print(f"WARNING: {bad.sum()} NaN/Inf values found - replacing with 0")
+        X[bad] = 0.0
+
+    np.savez_compressed(
+        out_path,
+        X=X, y_action=y_action, y_fraction=y_fraction,
+        step=step_arr, replay=replay_arr,
+        n_players=n_players,
+        winner=winner_arr,
+    )
+    print(f"Saved to {out_path}  ({out_path.stat().st_size / 1e6:.1f} MB)")
+
+    # Update metadata
+    updated_meta = {
+        "processed_files": list(already_done) + [f.name for f in new_files],
+        "next_replay_idx": next_idx + len(new_files),
+    }
+    with open(meta_path, 'w') as mf:
+        json.dump(updated_meta, mf, indent=2)
+    print(f"Metadata updated: {len(updated_meta['processed_files'])} total replays tracked")
 
 
 # ── quick single-file test ────────────────────────────────────────────────
@@ -380,13 +562,18 @@ if __name__ == '__main__':
     parser.add_argument(
         '--out_path',    type=str, default=str(DATASET_PATH),
         help=f'Output .npz path (default: {DATASET_PATH})')
-    parser.add_argument('--neg_ratio',   type=int, default=3)
-    parser.add_argument('--max_replays', type=int, default=None)
-    parser.add_argument('--workers',     type=int, default=1)
+    parser.add_argument('--neg_ratio',   type=int,  default=3)
+    parser.add_argument('--max_replays', type=int,  default=None)
+    parser.add_argument('--workers',     type=int,  default=1)
+    parser.add_argument('--append',      action='store_true',
+        help='Only process new replay files and append to existing dataset.npz')
     args = parser.parse_args()
 
     if args.replay_file:
         _test_single(args.replay_file)
+    elif args.append:
+        append_dataset(args.replay_dir, args.out_path,
+                       args.neg_ratio, args.workers)
     else:
         extract_dataset(args.replay_dir, args.out_path,
                         args.neg_ratio, args.max_replays, args.workers)
