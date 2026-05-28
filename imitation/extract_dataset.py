@@ -372,12 +372,93 @@ def extract_dataset(replay_dir: str, out_path: str,
 
 # ── incremental append ────────────────────────────────────────────────────
 
+def _flush_batch_to_npz(out_path: Path, meta_path: Path,
+                        batch_results: dict,
+                        batch_files: List[Path],
+                        already_done: Set[str],
+                        next_idx: int) -> Tuple[Set[str], int]:
+    """
+    Appends one batch of results to out_path, updates meta, returns
+    (updated_already_done, updated_next_idx).
+    """
+    new_X, new_y_act, new_y_frac = [], [], []
+    new_step, new_replay, new_n_players, new_winner = [], [], [], []
+
+    for local_i in sorted(batch_results):
+        X_r, y_act, y_frac, step_arr, n_ag, winner_id = batch_results[local_i]
+        if X_r.shape[0] == 0:
+            continue
+        n = len(y_act)
+        new_X.append(X_r)
+        new_y_act.append(y_act)
+        new_y_frac.append(y_frac)
+        new_step.append(step_arr)
+        new_replay.append(np.full(n, next_idx + local_i, dtype=np.int32))
+        new_n_players.append(np.full(n, n_ag,            dtype=np.int8))
+        new_winner.append(np.full(n, winner_id,          dtype=np.int8))
+
+    if not new_X:
+        # no valid samples in this batch, still update meta for the processed files
+        updated_done = already_done | {f.name for f in batch_files}
+        updated_next = next_idx + len(batch_files)
+        meta = {"processed_files": list(updated_done), "next_replay_idx": updated_next}
+        with open(meta_path, 'w') as mf:
+            json.dump(meta, mf, indent=2)
+        return updated_done, updated_next
+
+    if out_path.exists():
+        existing = np.load(out_path)
+        prev_n = existing['X'].shape[0]
+        X          = np.concatenate([existing['X']]          + new_X,         axis=0)
+        y_action   = np.concatenate([existing['y_action']]   + new_y_act,     axis=0)
+        y_fraction = np.concatenate([existing['y_fraction']] + new_y_frac,    axis=0)
+        step_arr   = np.concatenate([existing['step']]       + new_step,      axis=0)
+        replay_arr = np.concatenate([existing['replay']]     + new_replay,    axis=0)
+        n_players  = np.concatenate([existing['n_players']]  + new_n_players, axis=0)
+        winner_arr = np.concatenate([existing['winner']]     + new_winner,    axis=0)
+        existing.close()
+    else:
+        prev_n = 0
+        X          = np.concatenate(new_X,         axis=0)
+        y_action   = np.concatenate(new_y_act,     axis=0)
+        y_fraction = np.concatenate(new_y_frac,    axis=0)
+        step_arr   = np.concatenate(new_step,      axis=0)
+        replay_arr = np.concatenate(new_replay,    axis=0)
+        n_players  = np.concatenate(new_n_players, axis=0)
+        winner_arr = np.concatenate(new_winner,    axis=0)
+
+    bad = ~np.isfinite(X)
+    if bad.any():
+        X[bad] = 0.0
+
+    np.savez_compressed(
+        out_path,
+        X=X, y_action=y_action, y_fraction=y_fraction,
+        step=step_arr, replay=replay_arr,
+        n_players=n_players,
+        winner=winner_arr,
+    )
+    new_n = X.shape[0] - prev_n
+    print(f"  -> Flushed {new_n:,} new samples | total {X.shape[0]:,} "
+          f"| {out_path.stat().st_size / 1e6:.1f} MB")
+
+    updated_done = already_done | {f.name for f in batch_files}
+    updated_next = next_idx + len(batch_files)
+    meta = {"processed_files": list(updated_done), "next_replay_idx": updated_next}
+    with open(meta_path, 'w') as mf:
+        json.dump(meta, mf, indent=2)
+
+    return updated_done, updated_next
+
+
 def append_dataset(replay_dir: str, out_path: str,
                    neg_ratio: int = 3,
-                   workers: int = 1):
+                   workers: int = 1,
+                   batch_size: int = 1000):
     """
-    Only process replay files not already in dataset.npz, then concatenate.
-    Requires dataset_meta.json to exist alongside dataset.npz.
+    Only process replay files not already in dataset_meta.json, then append
+    to dataset.npz in chunks of batch_size (default 1000).  After each chunk
+    the NPZ and metadata are saved to disk, so the run is crash-safe.
     """
     out_path  = Path(out_path)
     meta_path = _meta_path(out_path)
@@ -388,8 +469,6 @@ def append_dataset(replay_dir: str, out_path: str,
         return
 
     if not meta_path.exists():
-        # No metadata — use file modification date to split old vs new.
-        # Files NOT modified today are assumed already in the dataset.
         from datetime import date
         today = date.today()
         all_files_sorted = sorted(Path(replay_dir).glob('*.json'))
@@ -406,8 +485,6 @@ def append_dataset(replay_dir: str, out_path: str,
         print(f"  Already processed (not today): {len(old_files)}")
         print(f"  New files (modified today):    {n_new}")
         print(f"Metadata written to {meta_path}")
-        with open(meta_path) as mf:
-            meta = json.load(mf)
 
     with open(meta_path) as mf:
         meta = json.load(mf)
@@ -425,110 +502,77 @@ def append_dataset(replay_dir: str, out_path: str,
 
     print(f"Existing dataset : {len(already_done)} replays, {next_idx} replay-index slots")
     print(f"New files found  : {len(new_files)}")
+    print(f"Batch size       : {batch_size}")
 
-    # Extract only the new files, starting replay indices from next_idx
-    new_results = {}
-    ok = fail = 0
-    n2_games = n4_games = 0
+    total_ok = total_fail = 0
+    total_n2 = total_n4 = 0
 
-    if workers <= 1:
-        rng = np.random.default_rng(next_idx)
-        for local_i, fpath in enumerate(new_files):
-            try:
-                result = extract_replay(str(fpath), neg_ratio, rng)
-                new_results[local_i] = result
-                if result[0].shape[0] == 0:
+    # slice new_files into batches and process each one
+    for batch_start in range(0, len(new_files), batch_size):
+        batch_files = new_files[batch_start: batch_start + batch_size]
+        batch_results = {}
+        ok = fail = 0
+        n2_games = n4_games = 0
+
+        print(f"\nBatch [{batch_start+1}–{batch_start+len(batch_files)}"
+              f"/{len(new_files)}]")
+
+        if workers <= 1:
+            rng = np.random.default_rng(next_idx + batch_start)
+            for local_i, fpath in enumerate(batch_files):
+                try:
+                    result = extract_replay(str(fpath), neg_ratio, rng)
+                    batch_results[local_i] = result
+                    if result[0].shape[0] == 0:
+                        fail += 1
+                    else:
+                        ok += 1
+                        if result[4] == 2: n2_games += 1
+                        else:              n4_games += 1
+                except Exception as e:
                     fail += 1
-                else:
-                    ok += 1
-                    if result[4] == 2: n2_games += 1
-                    else:              n4_games += 1
-            except Exception as e:
-                fail += 1
-                if fail <= 5:
-                    print(f"  ERROR {fpath.name}: {e}")
-            if (local_i + 1) % 100 == 0:
-                print(f"  [{local_i+1}/{len(new_files)}] ok={ok} fail={fail} "
-                      f"1v1={n2_games} 4p={n4_games}")
-    else:
-        args_list = [(fpath, neg_ratio, i) for i, fpath in enumerate(new_files)]
-        with ProcessPoolExecutor(max_workers=workers) as ex:
-            futures = {ex.submit(_worker, a): a[2] for a in args_list}
-            done_count = 0
-            for fut in as_completed(futures):
-                local_i, result, err = fut.result()
-                done_count += 1
-                if err or result is None or result[0].shape[0] == 0:
-                    fail += 1
-                    if fail <= 5 and err:
-                        print(f"  ERROR file {local_i}: {err}")
-                else:
-                    new_results[local_i] = result
-                    ok += 1
-                    if result[4] == 2: n2_games += 1
-                    else:              n4_games += 1
-                if done_count % 100 == 0:
-                    print(f"  [{done_count}/{len(new_files)}] ok={ok} fail={fail} "
-                          f"1v1={n2_games} 4p={n4_games}")
+                    if fail <= 5:
+                        print(f"  ERROR {fpath.name}: {e}")
+                done_in_batch = local_i + 1
+                if done_in_batch % 100 == 0:
+                    print(f"  [{done_in_batch}/{len(batch_files)}] "
+                          f"ok={ok} fail={fail} 1v1={n2_games} 4p={n4_games}")
+        else:
+            args_list = [(fpath, neg_ratio, batch_start + i)
+                         for i, fpath in enumerate(batch_files)]
+            with ProcessPoolExecutor(max_workers=workers) as ex:
+                futures = {ex.submit(_worker, a): a[2] for a in args_list}
+                done_count = 0
+                for fut in as_completed(futures):
+                    global_i, result, err = fut.result()
+                    local_i = global_i - batch_start
+                    done_count += 1
+                    if err or result is None or result[0].shape[0] == 0:
+                        fail += 1
+                        if fail <= 5 and err:
+                            print(f"  ERROR file {global_i}: {err}")
+                    else:
+                        batch_results[local_i] = result
+                        ok += 1
+                        if result[4] == 2: n2_games += 1
+                        else:              n4_games += 1
+                    if done_count % 100 == 0:
+                        print(f"  [{done_count}/{len(batch_files)}] "
+                              f"ok={ok} fail={fail} 1v1={n2_games} 4p={n4_games}")
 
-    if not new_results:
-        print("No valid new replays extracted.")
-        return
+        total_ok += ok; total_fail += fail
+        total_n2 += n2_games; total_n4 += n4_games
 
-    # Build arrays for new data
-    new_X, new_y_act, new_y_frac = [], [], []
-    new_step, new_replay, new_n_players, new_winner = [], [], [], []
+        # flush this batch to disk and update meta
+        already_done, next_idx = _flush_batch_to_npz(
+            out_path, meta_path,
+            batch_results, batch_files,
+            already_done, next_idx,
+        )
 
-    for local_i in sorted(new_results):
-        X_r, y_act, y_frac, step_arr, n_ag, winner_id = new_results[local_i]
-        if X_r.shape[0] == 0:
-            continue
-        n = len(y_act)
-        new_X.append(X_r)
-        new_y_act.append(y_act)
-        new_y_frac.append(y_frac)
-        new_step.append(step_arr)
-        new_replay.append(np.full(n, next_idx + local_i, dtype=np.int32))
-        new_n_players.append(np.full(n, n_ag,            dtype=np.int8))
-        new_winner.append(np.full(n, winner_id,          dtype=np.int8))
-
-    # Load existing dataset and concatenate
-    existing = np.load(out_path)
-    print(f"\nExisting samples : {existing['X'].shape[0]:,}")
-    print(f"New samples      : {sum(a.shape[0] for a in new_X):,}")
-
-    X          = np.concatenate([existing['X']]          + new_X,         axis=0)
-    y_action   = np.concatenate([existing['y_action']]   + new_y_act,     axis=0)
-    y_fraction = np.concatenate([existing['y_fraction']] + new_y_frac,    axis=0)
-    step_arr   = np.concatenate([existing['step']]       + new_step,      axis=0)
-    replay_arr = np.concatenate([existing['replay']]     + new_replay,    axis=0)
-    n_players  = np.concatenate([existing['n_players']]  + new_n_players, axis=0)
-    winner_arr = np.concatenate([existing['winner']]     + new_winner,    axis=0)
-
-    print(f"Total samples    : {X.shape[0]:,}")
-
-    bad = ~np.isfinite(X)
-    if bad.any():
-        print(f"WARNING: {bad.sum()} NaN/Inf values found - replacing with 0")
-        X[bad] = 0.0
-
-    np.savez_compressed(
-        out_path,
-        X=X, y_action=y_action, y_fraction=y_fraction,
-        step=step_arr, replay=replay_arr,
-        n_players=n_players,
-        winner=winner_arr,
-    )
-    print(f"Saved to {out_path}  ({out_path.stat().st_size / 1e6:.1f} MB)")
-
-    # Update metadata
-    updated_meta = {
-        "processed_files": list(already_done) + [f.name for f in new_files],
-        "next_replay_idx": next_idx + len(new_files),
-    }
-    with open(meta_path, 'w') as mf:
-        json.dump(updated_meta, mf, indent=2)
-    print(f"Metadata updated: {len(updated_meta['processed_files'])} total replays tracked")
+    print(f"\nAll done. Replays: {total_ok} ok, {total_fail} failed")
+    print(f"  1v1 games: {total_n2}   4-player games: {total_n4}")
+    print(f"  Total processed: {len(already_done)} replays tracked in meta")
 
 
 # ── quick single-file test ────────────────────────────────────────────────
@@ -569,13 +613,15 @@ if __name__ == '__main__':
     parser.add_argument('--workers',     type=int,  default=1)
     parser.add_argument('--append',      action='store_true',
         help='Only process new replay files and append to existing dataset.npz')
+    parser.add_argument('--batch_size',  type=int,  default=1000,
+        help='Flush to disk every N replays in append mode (default: 1000)')
     args = parser.parse_args()
 
     if args.replay_file:
         _test_single(args.replay_file)
     elif args.append:
         append_dataset(args.replay_dir, args.out_path,
-                       args.neg_ratio, args.workers)
+                       args.neg_ratio, args.workers, args.batch_size)
     else:
         extract_dataset(args.replay_dir, args.out_path,
                         args.neg_ratio, args.max_replays, args.workers)
