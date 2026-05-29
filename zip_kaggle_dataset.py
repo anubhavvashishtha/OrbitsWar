@@ -232,8 +232,13 @@ def build_imitation_zip(out_path: Path):
 
 def build_rl_zip(out_path: Path):
     """
-    Contains last.pt (OrbitsNet) for critic warm-start.
-    Optional — critic starts from random init if not provided.
+    Contains EdgeTransformerNet PPO checkpoints for resuming training.
+
+      transformer_last.pt  — latest checkpoint from previous session
+      transformer_best.pt  — best win-rate checkpoint
+
+    Upload this zip as 'orbitswar-rl' and attach it to train_transformer_ppo.ipynb
+    to resume from a previous Kaggle session instead of starting fresh.
     """
     stats = {"files": 0, "bytes": 0}
     print(f"\n{'='*60}")
@@ -241,19 +246,20 @@ def build_rl_zip(out_path: Path):
     print(f"{'='*60}")
 
     candidates = [
-        ROOT / "rl" / "last.pt",
-        ROOT / "rl" / "best.pt",
+        (ROOT / "rl" / "transformer_last.pt", "transformer_last.pt"),
+        (ROOT / "rl" / "transformer_best.pt", "transformer_best.pt"),
     ]
-    found = [p for p in candidates if p.exists()]
+    found = [(src, arc) for src, arc in candidates if src.exists()]
 
     if not found:
-        print("  [SKIP] No rl/last.pt or rl/best.pt found.")
-        print("  This dataset is optional — the PPO critic will start fresh.")
+        print("  [SKIP] No transformer checkpoints found in rl/.")
+        print("  Download transformer_last.pt from the Kaggle Output tab first,")
+        print("  place it in rl/, then re-run:  python zip_kaggle_dataset.py --models")
         return None
 
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for p in found:
-            _add_file(zf, p, p.name, stats)
+        for src, arc in found:
+            _add_file(zf, src, arc, stats)
 
     mb = out_path.stat().st_size / 1e6
     print(f"\n  Done: {stats['files']} files  ->  {mb:.1f} MB")

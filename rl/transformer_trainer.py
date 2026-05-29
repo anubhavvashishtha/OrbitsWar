@@ -75,7 +75,7 @@ BEST_PATH           = ROOT / "transformer_best.pt"
 
 # ── hyper-parameters ──────────────────────────────────────────────────────
 N_ROUNDS        = 100_000
-GAMES_PER_ROUND = 8
+GAMES_PER_ROUND = 16
 LR_ACTOR        = 5e-5    # low — actor is pretrained; fine-tune carefully
 LR_CRITIC       = 3e-4
 CLIP_EPS        = 0.2
@@ -85,20 +85,13 @@ MINI_BATCH      = 64      # turns per mini-batch (variable E handled via loop)
 ACTION_THRESHOLD = 0.35   # execute edges above this; only primary used for PPO
 TOP_K_EDGES      = 5
 
-# ── adaptive entropy (SAC-style) ───────────────────────────────────────────
-# TARGET_ENTROPY: desired Categorical entropy over edges (nats).
-#   log(1) = 0.0  → always picks the same edge (fully deterministic)
-#   log(2) = 0.69 → roughly binary — top-2 edges share the probability
-#   log(3) = 1.10 → top-3 edges roughly equally likely (recommended)
-#   log(N) = max  → uniform over all N edges (fully random)
-#
-# log_alpha is a learnable scalar; alpha = exp(log_alpha) plays the role
-# of ENT_COEF and is updated to drive entropy towards TARGET_ENTROPY.
-# alpha is clamped to [ENT_COEF_MIN, ENT_COEF_MAX] for stability.
-TARGET_ENTROPY  = 1.0     # log(3) ≈ 1.10 — agent commits to top ~3 edges
-LR_ALPHA        = 3e-4    # learning rate for the entropy coefficient
-ENT_COEF_MIN    = 1e-3    # floor — never fully suppress exploration
-ENT_COEF_MAX    = 0.20    # ceiling — never let entropy dominate the loss
+ENT_COEF = 0.01  # fixed entropy bonus — adaptive alpha kept hitting its ceiling
+
+# ── Critic warm-up ─────────────────────────────────────────────────────────
+# Fresh critic gives noisy value estimates → noisy advantages → bad PPO.
+# For the first CRITIC_WARMUP_ROUNDS rounds the actor is frozen: only the
+# critic is updated so it can calibrate V(s) before PPO fine-tunes the actor.
+CRITIC_WARMUP_ROUNDS = 20
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -385,7 +378,7 @@ def play_game_collect(actor: EdgeTransformerNet,
     winner  = -1 if max_r <= 0 else rewards.index(max_r)
 
     if buf.rewards:
-        buf.rewards[-1] = 1.0 if winner == 0 else 0.0
+        buf.rewards[-1] += 1.0 if winner == 0 else -0.5
         buf.dones[-1]   = True
 
     outcome = "WIN" if winner == 0 else ("DRAW" if winner < 0 else "LOSS")
@@ -399,24 +392,18 @@ def play_game_collect(actor: EdgeTransformerNet,
 def ppo_update(actor: EdgeTransformerNet,
                critic: TransformerCritic,
                optimizer: optim.Optimizer,
-               log_alpha: nn.Parameter,
-               alpha_optimizer: optim.Optimizer,
                bufs: list,
-               device: str):
+               device: str,
+               freeze_actor: bool = False):
     """
-    PPO update with SAC-style adaptive entropy coefficient.
+    PPO update with fixed entropy coefficient (ENT_COEF).
 
-    log_alpha is a learnable scalar:  alpha = exp(log_alpha).
-    After each mini-batch, alpha is updated to drive entropy towards
-    TARGET_ENTROPY:
-        L_alpha = -alpha * (entropy - TARGET_ENTROPY)
-    When entropy > target -> L_alpha > 0 -> alpha increases -> more penalty.
-    When entropy < target -> L_alpha < 0 -> alpha decreases -> less penalty.
-
-    alpha is clamped to [ENT_COEF_MIN, ENT_COEF_MAX] for stability.
+    freeze_actor=True: only the critic is updated (warm-up phase).
+      The actor forward still runs (for log-probs), but its gradients
+      are not applied.
     """
     if not bufs:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0
 
     # ── Collect all transitions from all games ────────────────────────────
     all_tf   = []
@@ -439,7 +426,7 @@ def ppo_update(actor: EdgeTransformerNet,
             all_adv.append(adv)
 
     if not all_tf:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0
 
     N = len(all_tf)
     old_lp  = torch.FloatTensor(all_oldp).to(device)
@@ -447,7 +434,7 @@ def ppo_update(actor: EdgeTransformerNet,
     adv_all = torch.FloatTensor(all_adv).to(device)
     adv_all = (adv_all - adv_all.mean()) / (adv_all.std() + 1e-8)
 
-    total_loss = total_ent = total_alpha = 0.0
+    total_loss = total_ent = 0.0
     n_updates  = 0
 
     actor.train(); critic.train()
@@ -477,46 +464,32 @@ def ppo_update(actor: EdgeTransformerNet,
             entropy = torch.stack(entropies).mean()   # scalar
             values  = torch.stack(values_list)        # (batch,)
 
-            # ── current alpha (clamped for stability) ──────────────────────
-            alpha = log_alpha.exp().clamp(ENT_COEF_MIN, ENT_COEF_MAX)
-
-            # ── PPO clip loss ──────────────────────────────────────────────
-            ratio  = torch.exp(new_lp - old_lp[batch])
-            adv_b  = adv_all[batch]
-            L_clip = torch.min(
-                ratio * adv_b,
-                torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * adv_b
-            ).mean()
-            L_val  = F.mse_loss(values, returns[batch])
-            loss   = -L_clip + VAL_COEF * L_val - alpha.detach() * entropy
+            # ── Loss ───────────────────────────────────────────────────────
+            L_val = F.mse_loss(values, returns[batch])
+            if freeze_actor:
+                loss = VAL_COEF * L_val
+            else:
+                ratio  = torch.exp(new_lp - old_lp[batch])
+                adv_b  = adv_all[batch]
+                L_clip = torch.min(
+                    ratio * adv_b,
+                    torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * adv_b
+                ).mean()
+                loss = -L_clip + VAL_COEF * L_val - ENT_COEF * entropy
 
             optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(
-                list(actor.parameters()) + list(critic.parameters()), 0.5)
+            grad_params = (list(critic.parameters()) if freeze_actor
+                           else list(actor.parameters()) + list(critic.parameters()))
+            nn.utils.clip_grad_norm_(grad_params, 0.5)
             optimizer.step()
 
-            # ── alpha update (SAC-style) ───────────────────────────────────
-            # L_alpha = -alpha * (entropy.detach() - TARGET_ENTROPY)
-            # If entropy > target  ->  loss > 0  ->  alpha increases
-            # If entropy < target  ->  loss < 0  ->  alpha decreases
-            alpha_loss = -(log_alpha * (entropy.detach() - TARGET_ENTROPY))
-            alpha_optimizer.zero_grad()
-            alpha_loss.backward()
-            alpha_optimizer.step()
-            # Re-clamp log_alpha so alpha stays within safe range
-            with torch.no_grad():
-                log_alpha.clamp_(
-                    math.log(ENT_COEF_MIN),
-                    math.log(ENT_COEF_MAX))
-
-            total_loss  += loss.item()
-            total_ent   += entropy.item()
-            total_alpha += alpha.item()
-            n_updates   += 1
+            total_loss += loss.item()
+            total_ent  += entropy.item()
+            n_updates  += 1
 
     n = max(1, n_updates)
-    return total_loss / n, total_ent / n, total_alpha / n
+    return total_loss / n, total_ent / n
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -526,7 +499,6 @@ def ppo_update(actor: EdgeTransformerNet,
 def train(n_rounds:        int  = N_ROUNDS,
           games_per_round: int  = GAMES_PER_ROUND,
           actor_path:      str  = str(DEFAULT_ACTOR_PATH),
-          critic_path:     str  = str(DEFAULT_CRITIC_PATH),
           device:          str  = "auto"):
 
     if device == "auto":
@@ -546,21 +518,13 @@ def train(n_rounds:        int  = N_ROUNDS,
 
     # ── Load critic ────────────────────────────────────────────────────────
     critic = TransformerCritic().to(device)
-    print("  Critic: TransformerCritic (d=64, 2 layers) — starts fresh.")
 
-    # ── Adaptive entropy coefficient (SAC-style) ──────────────────────────
-    # log_alpha is a learnable scalar; alpha = exp(log_alpha) acts as ENT_COEF
-    # and is auto-tuned to keep entropy near TARGET_ENTROPY.
-    log_alpha = nn.Parameter(
-        torch.tensor(math.log(0.05), dtype=torch.float32, device=device))
-    alpha_optimizer = optim.Adam([log_alpha], lr=LR_ALPHA)
-
-    # Resume from transformer checkpoint if available
-    best_wr    = 0.0
-    start_rnd  = 1
-    avg_loss   = 0.0
-    avg_ent    = 0.0
-    avg_alpha  = math.exp(log_alpha.item())
+    # ── Resume from transformer checkpoint if available ────────────────────
+    best_wr        = 0.0
+    start_rnd      = 1
+    avg_loss       = 0.0
+    avg_ent        = 0.0
+    is_fresh_start = True   # flipped to False if a checkpoint loads successfully
 
     for resume_path in [SAVE_PATH, BEST_PATH]:
         if resume_path.exists():
@@ -568,16 +532,19 @@ def train(n_rounds:        int  = N_ROUNDS,
                 ckpt = torch.load(resume_path, map_location=device, weights_only=False)
                 actor.load_state_dict(ckpt["actor"])
                 critic.load_state_dict(ckpt["critic"])
-                if "log_alpha" in ckpt:
-                    log_alpha.data.fill_(ckpt["log_alpha"])
-                best_wr   = ckpt.get("best_wr", 0.0)
-                start_rnd = ckpt.get("epoch", 1) + 1
+                best_wr        = ckpt.get("best_wr", 0.0)
+                start_rnd      = ckpt.get("epoch", 1) + 1
+                is_fresh_start = False
                 print(f"Resumed from {resume_path.name}  "
-                      f"(round {start_rnd-1}, best_wr={best_wr:.1%}, "
-                      f"alpha={log_alpha.exp().item():.4f})")
+                      f"(round {start_rnd-1}, best_wr={best_wr:.1%})")
+                print(f"  Critic: loaded from checkpoint — warm-up skipped.")
                 break
             except Exception as e:
                 print(f"  Could not resume from {resume_path.name}: {e}")
+
+    if is_fresh_start:
+        print(f"  Critic: TransformerCritic — starts fresh.")
+        print(f"  Actor will be frozen for first {CRITIC_WARMUP_ROUNDS} rounds (critic warm-up).")
 
     # ── Optimizers ─────────────────────────────────────────────────────────
     optimizer = optim.AdamW([
@@ -609,8 +576,8 @@ def train(n_rounds:        int  = N_ROUNDS,
     print(f"Critic params: {n_critic:,}")
     print(f"\nPPO (EdgeTransformer): {n_rounds} rounds x {games_per_round} games")
     print(f"  LR actor={LR_ACTOR}  LR critic={LR_CRITIC}")
-    print(f"  ENT target={TARGET_ENTROPY}  alpha0={math.exp(log_alpha.item()):.4f}  "
-          f"alpha_range=[{ENT_COEF_MIN},{ENT_COEF_MAX}]  CLIP_EPS={CLIP_EPS}")
+    print(f"  ENT_COEF={ENT_COEF} (fixed)  CLIP_EPS={CLIP_EPS}")
+    print(f"  Critic warm-up: first {CRITIC_WARMUP_ROUNDS} rounds actor is frozen")
     print("=" * 60)
 
     no_improve = 0
@@ -657,10 +624,13 @@ def train(n_rounds:        int  = N_ROUNDS,
             sys.stdout.flush()
 
         # ── PPO update on all games from this round ────────────────────────
-        avg_loss, avg_ent, avg_alpha = ppo_update(
+        # Warm-up only on a fresh start (no prior checkpoint).
+        # When resuming, the critic is already calibrated — skip immediately.
+        freeze_actor = is_fresh_start and ((rnd - 1) < CRITIC_WARMUP_ROUNDS)
+        avg_loss, avg_ent = ppo_update(
             actor, critic, optimizer,
-            log_alpha, alpha_optimizer,
-            all_bufs, device)
+            all_bufs, device,
+            freeze_actor=freeze_actor)
         for buf in all_bufs:
             buf.clear()
 
@@ -668,14 +638,12 @@ def train(n_rounds:        int  = N_ROUNDS,
         tag = ""
 
         ckpt = {
-            "epoch":     rnd,
-            "best_wr":   max(wr, best_wr),
-            "loss":      avg_loss,
-            "entropy":   avg_ent,
-            "alpha":     avg_alpha,
-            "log_alpha": log_alpha.item(),
-            "actor":     actor.state_dict(),
-            "critic":    critic.state_dict(),
+            "epoch":   rnd,
+            "best_wr": max(wr, best_wr),
+            "loss":    avg_loss,
+            "entropy": avg_ent,
+            "actor":   actor.state_dict(),
+            "critic":  critic.state_dict(),
         }
         torch.save(ckpt, SAVE_PATH)
 
@@ -688,9 +656,9 @@ def train(n_rounds:        int  = N_ROUNDS,
             no_improve += 1
             tag = f"  (no improve, best={best_wr:.1%}, streak={no_improve})"
 
+        warmup_str = "  [critic warmup — actor frozen]" if freeze_actor else ""
         print(f"\n  -> WR={wr:.1%}  loss={avg_loss:.4f}  "
-              f"ent={avg_ent:.4f}  alpha={avg_alpha:.4f}  "
-              f"[target={TARGET_ENTROPY:.2f}]{tag}")
+              f"ent={avg_ent:.4f}{warmup_str}{tag}")
 
     print(f"\nDone. Best WR={best_wr:.1%}")
     return actor, critic
@@ -705,7 +673,6 @@ if __name__ == "__main__":
     p.add_argument("--rounds",   type=int,  default=N_ROUNDS)
     p.add_argument("--games",    type=int,  default=GAMES_PER_ROUND)
     p.add_argument("--actor",    type=str,  default=str(DEFAULT_ACTOR_PATH))
-    p.add_argument("--critic",   type=str,  default=str(DEFAULT_CRITIC_PATH))
     p.add_argument("--device",   type=str,  default="auto")
     args = p.parse_args()
 
@@ -713,6 +680,5 @@ if __name__ == "__main__":
         n_rounds=args.rounds,
         games_per_round=args.games,
         actor_path=args.actor,
-        critic_path=args.critic,
         device=args.device,
     )

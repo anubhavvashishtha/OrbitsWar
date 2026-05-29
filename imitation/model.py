@@ -496,6 +496,93 @@ def load_model(checkpoint_path: str,
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# CRITIC  (shared with rl/transformer_trainer.py for submission)
+# ════════════════════════════════════════════════════════════════════════════
+
+class TransformerCritic(nn.Module):
+    """
+    Lightweight transformer critic that reads the same (E, 81) edge features
+    as EdgeTransformerNet and produces a scalar V(s) estimate.
+
+    Architecture: d_model=64, 2 encoder layers, mean-pool → linear value head.
+    No Sigmoid — V(s) is unbounded so GAE can go negative during training.
+    At inference V(s) ≈ expected return [0, 1] after PPO training converges.
+    """
+    _D = 64
+
+    def __init__(self):
+        super().__init__()
+        D = self._D
+        self.global_proj = nn.Sequential(nn.Linear(31, D), nn.LayerNorm(D), nn.GELU())
+        self.src_proj    = nn.Sequential(nn.Linear(18, D), nn.LayerNorm(D), nn.GELU())
+        self.tgt_proj    = nn.Sequential(nn.Linear(18, D), nn.LayerNorm(D), nn.GELU())
+        self.edge_proj   = nn.Sequential(nn.Linear(14, D), nn.LayerNorm(D), nn.GELU())
+        self.fuse        = nn.Sequential(nn.Linear(4 * D, D), nn.LayerNorm(D), nn.GELU())
+
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=D, nhead=4, dim_feedforward=D * 4,
+            dropout=0.1, batch_first=True, norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(
+            enc_layer, num_layers=2, enable_nested_tensor=False)
+
+        self.value_head = nn.Sequential(
+            nn.Linear(D, D // 2), nn.ReLU(), nn.Linear(D // 2, 1)
+        )
+
+    def forward(self, x: torch.Tensor, pad_mask=None) -> torch.Tensor:
+        """
+        x        : (B, E, 81)  or (1, E, 81) for a single turn
+        pad_mask : (B, E) bool — True = padding, excluded from mean-pool
+        Returns  : (B,) scalar values
+        """
+        g = self.global_proj(x[..., :31])
+        s = self.src_proj(x[..., 31:49])
+        t = self.tgt_proj(x[..., 49:67])
+        e = self.edge_proj(x[..., 67:81])
+        h = self.fuse(torch.cat([g, s, t, e], dim=-1))
+        h = self.transformer(h, src_key_padding_mask=pad_mask)
+
+        if pad_mask is not None:
+            real   = (~pad_mask).unsqueeze(-1).float()
+            h_mean = (h * real).sum(1) / real.sum(1).clamp(min=1)
+        else:
+            h_mean = h.mean(1)
+
+        return self.value_head(h_mean).squeeze(-1)
+
+
+def load_ppo_checkpoint(checkpoint_path: str,
+                        device: str = 'cpu'):
+    """
+    Load actor + critic from a PPO transformer checkpoint.
+    Returns (EdgeTransformerNet, TransformerCritic) or (None, None) on failure.
+    """
+    import os
+    if not os.path.exists(checkpoint_path):
+        return None, None
+    try:
+        ckpt   = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        actor  = EdgeTransformerNet()
+        actor.load_state_dict(ckpt['actor'])
+        actor.eval()
+        actor.to(device)
+
+        critic = TransformerCritic()
+        critic.load_state_dict(ckpt['critic'])
+        critic.eval()
+        critic.to(device)
+
+        epoch   = ckpt.get('epoch', '?')
+        best_wr = ckpt.get('best_wr', float('nan'))
+        print(f"Loaded PPO checkpoint  epoch={epoch}  best_wr={best_wr:.1%}")
+        return actor, critic
+    except Exception as e:
+        print(f"[load_ppo_checkpoint] {checkpoint_path}: {e}")
+        return None, None
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # ENTRY POINT
 # ════════════════════════════════════════════════════════════════════════════
 

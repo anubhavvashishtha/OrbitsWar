@@ -37,43 +37,62 @@ except ImportError:
 
 # ── local imports ─────────────────────────────────────────────────────────
 from features import build_all_candidate_edges
-from model import EdgeTransformerNet, load_model
+from model import EdgeTransformerNet, TransformerCritic, load_model, load_ppo_checkpoint
 
 # ── configuration ──────────────────────────────────────────────────────────
 _ENV_PATH       = os.environ.get('ORBIT_MODEL_PATH', '')
 _CHECKPOINT_DIR = Path(__file__).parent / 'checkpoints'
+_PPO_CHECKPOINT = Path(__file__).parent.parent / 'rl' / 'transformer_best.pt'
 
-_CANDIDATE_CHECKPOINTS = [p for p in [
+_IMITATION_CHECKPOINTS = [p for p in [
     Path(_ENV_PATH) if _ENV_PATH else None,
     _CHECKPOINT_DIR / 'best_model.pt',
     _CHECKPOINT_DIR / 'latest_model.pt',
 ] if p is not None]
 
-TOP_K_EDGES          = 5      # max edges committed per turn
-ACTION_PROB_THRESHOLD = 0.35  # min action probability
+TOP_K_EDGES           = 5     # max edges committed per turn
+ACTION_PROB_THRESHOLD = 0.35  # default min action probability
 MIN_FRACTION          = 0.08  # min ship fraction (below → skip)
 MAX_FRACTION_PER_PLANET = 0.90
 
-# ── model singleton ────────────────────────────────────────────────────────
-_model: Optional[EdgeTransformerNet] = None
+# ── model singletons ───────────────────────────────────────────────────────
+_model:  Optional[EdgeTransformerNet] = None
+_critic: Optional[TransformerCritic]  = None
 _device = 'cpu'
 
 
-def _get_model() -> Optional[EdgeTransformerNet]:
-    global _model
+def _get_models():
+    """
+    Returns (actor, critic).  Tries the PPO checkpoint first (has both actor
+    and fine-tuned weights).  Falls back to imitation-only checkpoint (critic
+    will be None).
+    """
+    global _model, _critic
     if _model is not None:
-        return _model
-    for ckpt in _CANDIDATE_CHECKPOINTS:
+        return _model, _critic
+
+    # PPO checkpoint — actor fine-tuned by PPO + calibrated critic
+    if _PPO_CHECKPOINT.exists():
+        actor, critic = load_ppo_checkpoint(str(_PPO_CHECKPOINT), device=_device)
+        if actor is not None:
+            _model  = actor
+            _critic = critic
+            return _model, _critic
+
+    # Imitation-only fallback
+    for ckpt in _IMITATION_CHECKPOINTS:
         if not ckpt.exists():
             continue
         try:
             _model = load_model(str(ckpt), device=_device)
             _model.eval()
-            return _model
+            print(f"[agent_nn] Using imitation checkpoint: {ckpt.name}")
+            return _model, None
         except Exception as e:
             print(f"[agent_nn] Could not load {ckpt.name}: {e}")
+
     print("[agent_nn] No checkpoint found — falling back to rule-based agent.")
-    return None
+    return None, None
 
 
 # ── edge scoring ───────────────────────────────────────────────────────────
@@ -187,14 +206,14 @@ def agent(obs, config=None):
     Drop-in replacement for main.py's agent().
     Falls back to rule-based agent if model is unavailable.
     """
-    model = _get_model()
+    model, critic = _get_models()
     if model is None or not _MAIN_AVAILABLE:
         if _MAIN_AVAILABLE:
             from main import agent as _fallback
             return _fallback(obs, config)
         return []
     try:
-        return _agent_impl(obs, model)
+        return _agent_impl(obs, model, critic)
     except Exception:
         if _MAIN_AVAILABLE:
             try:
@@ -205,17 +224,43 @@ def agent(obs, config=None):
         return []
 
 
-def _agent_impl(obs, model: EdgeTransformerNet) -> List[List]:
+def _agent_impl(obs, model: EdgeTransformerNet,
+                critic: Optional[TransformerCritic] = None) -> List[List]:
     world = build_world(obs)
     if not world.my_planets:
         return []
 
-    scored = score_all_edges(obs, model)
-    if not scored:
+    candidates = build_all_candidate_edges(obs)
+    if not candidates:
         from main import _agent_impl as _main_impl
         return _main_impl(obs, None)
 
-    return build_moves_from_scores(scored, world)
+    feat_matrix = np.array([f for _, _, f in candidates], dtype=np.float32)
+    X = torch.from_numpy(feat_matrix).unsqueeze(0)
+
+    with torch.no_grad():
+        al, fl = model(X, pad_mask=None)
+        act_prob = torch.sigmoid(al.squeeze(0).squeeze(-1)).cpu().numpy()
+        fraction = torch.sigmoid(fl.squeeze(0).squeeze(-1)).cpu().numpy()
+
+    edge_list = [(src_id, tgt_id) for src_id, tgt_id, _ in candidates]
+    scored = [
+        (float(act_prob[i]), float(fraction[i]), src_id, tgt_id)
+        for i, (src_id, tgt_id) in enumerate(edge_list)
+    ]
+    scored.sort(key=lambda x: -x[0])
+
+    # Critic V(s): modulate action threshold based on estimated position quality.
+    # High V(s) → we're likely winning → be more selective (raise threshold).
+    # Low V(s)  → we're likely losing  → be more aggressive (lower threshold).
+    threshold = ACTION_PROB_THRESHOLD
+    if critic is not None:
+        with torch.no_grad():
+            v = float(critic(X).item())
+        threshold = float(np.clip(ACTION_PROB_THRESHOLD + (v - 0.5) * 0.20,
+                                  0.15, 0.55))
+
+    return build_moves_from_scores(scored, world, prob_threshold=threshold)
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
@@ -250,7 +295,7 @@ if __name__ == '__main__':
           f"{'1v1' if n_agents == 2 else f'{n_agents}p-FFA'}")
     print(f"Winner actual actions: {actual}")
 
-    m = _get_model()
+    m, _ = _get_models()
     if m is None:
         print("No model found."); sys.exit(1)
 
