@@ -42,7 +42,12 @@ from model import EdgeTransformerNet, TransformerCritic, load_model, load_ppo_ch
 # ── configuration ──────────────────────────────────────────────────────────
 _ENV_PATH       = os.environ.get('ORBIT_MODEL_PATH', '')
 _CHECKPOINT_DIR = Path(__file__).parent / 'checkpoints'
-_PPO_CHECKPOINT = Path(__file__).parent.parent / 'rl' / 'transformer_best.pt'
+_PPO_CHECKPOINTS = [
+    _CHECKPOINT_DIR / 'transformer_best.pt',
+    _CHECKPOINT_DIR / 'transformer_last.pt',
+    Path(__file__).parent.parent / 'rl' / 'transformer_best.pt',
+    Path(__file__).parent.parent / 'rl' / 'transformer_last.pt',
+]
 
 _IMITATION_CHECKPOINTS = [p for p in [
     Path(_ENV_PATH) if _ENV_PATH else None,
@@ -72,11 +77,14 @@ def _get_models():
         return _model, _critic
 
     # PPO checkpoint — actor fine-tuned by PPO + calibrated critic
-    if _PPO_CHECKPOINT.exists():
-        actor, critic = load_ppo_checkpoint(str(_PPO_CHECKPOINT), device=_device)
+    for ppo_path in _PPO_CHECKPOINTS:
+        if not ppo_path.exists():
+            continue
+        actor, critic = load_ppo_checkpoint(str(ppo_path), device=_device)
         if actor is not None:
             _model  = actor
             _critic = critic
+            print(f"[agent_nn] Using PPO checkpoint: {ppo_path}")
             return _model, _critic
 
     # Imitation-only fallback

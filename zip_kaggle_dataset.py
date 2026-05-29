@@ -298,6 +298,117 @@ def build_dataset_zip(out_path: Path):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ZIP 5 — submission_imitation   (Kaggle competition submission)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_submission_zip(out_path: Path):
+    """
+    Creates a submission zip ready to upload to the orbit_wars competition.
+
+    Flat structure (all files at root so imports work inside Kaggle sandbox):
+      agent_nn.py          ← entry point — defines agent(obs, config)
+      features.py          ← edge feature builder
+      model.py             ← EdgeTransformerNet + TransformerCritic
+      main.py              ← physics layer (build_world, plan_shot)
+      checkpoints/
+        best_model.pt      ← imitation model weights
+
+    The agent loads the PPO checkpoint first (rl/transformer_best.pt) if it
+    exists, then falls back to checkpoints/best_model.pt automatically.
+    For an imitation-only submission, only the imitation checkpoint is included.
+    """
+    stats = {"files": 0, "bytes": 0}
+    print(f"\n{'='*60}")
+    print(f"  Building {out_path.name}")
+    print(f"{'='*60}")
+
+    # Required files
+    files = [
+        (ROOT / "imitation" / "agent_nn.py",  "agent_nn.py"),
+        (ROOT / "imitation" / "features.py",  "features.py"),
+        (ROOT / "imitation" / "model.py",     "model.py"),
+        (ROOT / "main.py",                    "main.py"),
+    ]
+    ckpt = ROOT / "imitation" / "checkpoints" / "best_model.pt"
+
+    # Validate everything exists before writing
+    missing = [src for src, _ in files if not src.exists()]
+    if missing:
+        for m in missing:
+            print(f"  [SKIP] Missing: {m}")
+        return None
+    if not ckpt.exists():
+        print(f"  [SKIP] Model not found: {ckpt}")
+        print("  Train imitation model first:")
+        print("    python imitation/model.py --dataset imitation/dataset.npz")
+        return None
+
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for src, arc in files:
+            _add_file(zf, src, arc, stats)
+        _add_file(zf, ckpt, "checkpoints/best_model.pt", stats)
+
+    mb = out_path.stat().st_size / 1e6
+    ckpt_mb = ckpt.stat().st_size / 1e6
+    print(f"\n  Done: {stats['files']} files  ->  {mb:.1f} MB")
+    print(f"  Model weights: {ckpt_mb:.1f} MB")
+    print(f"\n  Submit at: kaggle.com/competitions/orbit-wars -> Submit Predictions")
+    print(f"  Upload   : {out_path.name}")
+    return stats
+
+
+
+
+def build_submission_ppo_zip(out_path: Path):
+    """
+    Competition submission with PPO-finetuned EdgeTransformerNet.
+
+    Same flat layout as submission_imitation, plus:
+      checkpoints/transformer_best.pt  (from rl/ after PPO training)
+    agent_nn.py loads PPO checkpoint first, then imitation fallback.
+    """
+    stats = {"files": 0, "bytes": 0}
+    print(f"\n{'='*60}")
+    print(f"  Building {out_path.name}")
+    print(f"{'='*60}")
+
+    files = [
+        (ROOT / "imitation" / "agent_nn.py",  "agent_nn.py"),
+        (ROOT / "imitation" / "features.py",  "features.py"),
+        (ROOT / "imitation" / "model.py",     "model.py"),
+        (ROOT / "main.py",                    "main.py"),
+    ]
+    ppo_candidates = [
+        (ROOT / "rl" / "transformer_best.pt", "checkpoints/transformer_best.pt"),
+        (ROOT / "rl" / "transformer_last.pt", "checkpoints/transformer_last.pt"),
+    ]
+    ppo_found = [(src, arc) for src, arc in ppo_candidates if src.exists()]
+
+    missing = [src for src, _ in files if not src.exists()]
+    if missing:
+        for m in missing:
+            print(f"  [SKIP] Missing: {m}")
+        return None
+    if not ppo_found:
+        print("  [SKIP] No PPO checkpoint in rl/.")
+        print("  Download transformer_best.pt from Kaggle Output -> rl/")
+        return None
+
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for src, arc in files:
+            _add_file(zf, src, arc, stats)
+        for src, arc in ppo_found:
+            _add_file(zf, src, arc, stats)
+        imit = ROOT / "imitation" / "checkpoints" / "best_model.pt"
+        if imit.exists():
+            _add_file(zf, imit, "checkpoints/best_model.pt", stats)
+
+    mb = out_path.stat().st_size / 1e6
+    print(f"\n  Done: {stats['files']} files  ->  {mb:.1f} MB")
+    print("  Submit at: kaggle.com/competitions/orbit-wars")
+    return stats
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -322,17 +433,21 @@ Workflow
                      Upload orbitswar-imitation.zip + orbitswar-rl.zip
                      Run train_transformer_ppo.ipynb on Kaggle GPU
         """)
-    parser.add_argument("--src",     action="store_true", help="Source code + notebooks")
-    parser.add_argument("--dataset", action="store_true", help="dataset.npz (after extraction)")
-    parser.add_argument("--models",  action="store_true", help="Model checkpoints (after training)")
-    parser.add_argument("--all",     action="store_true", help="Build everything available")
+    parser.add_argument("--src",        action="store_true", help="Source code + notebooks")
+    parser.add_argument("--dataset",    action="store_true", help="dataset.npz (after extraction)")
+    parser.add_argument("--models",     action="store_true", help="Model checkpoints (after training)")
+    parser.add_argument("--submission", action="store_true", help="Imitation-only competition zip")
+    parser.add_argument("--submission-ppo", action="store_true", help="PPO competition zip")
+    parser.add_argument("--all",        action="store_true", help="Build everything available")
     args = parser.parse_args()
 
     # default: build everything if no flag given
-    build_all = args.all or not (args.src or args.dataset or args.models)
-    do_src     = args.src     or build_all
-    do_dataset = args.dataset or build_all
-    do_models  = args.models  or build_all
+    build_all    = args.all or not (args.src or args.dataset or args.models or args.submission or args.submission_ppo)
+    do_src        = args.src        or build_all
+    do_dataset    = args.dataset    or build_all
+    do_models     = args.models     or build_all
+    do_submission = args.submission or build_all
+    do_submission_ppo = args.submission_ppo or build_all
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -360,6 +475,18 @@ Workflow
         r = build_rl_zip(p)
         if r:
             built.append(("orbitswar-rl",         p, "optional — critic warm-start"))
+
+    if do_submission:
+        p = OUT_DIR / "submission_imitation.zip"
+        r = build_submission_zip(p)
+        if r:
+            built.append(("submission_imitation", p, "upload to competition"))
+
+    if do_submission_ppo:
+        p = OUT_DIR / "submission_ppo.zip"
+        r = build_submission_ppo_zip(p)
+        if r:
+            built.append(("submission_ppo", p, "upload to competition (PPO)"))
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n{'='*60}")

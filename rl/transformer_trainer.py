@@ -77,15 +77,25 @@ BEST_PATH           = ROOT / "transformer_best.pt"
 N_ROUNDS        = 100_000
 GAMES_PER_ROUND = 16
 LR_ACTOR        = 5e-5    # low — actor is pretrained; fine-tune carefully
-LR_CRITIC       = 3e-4
+LR_CRITIC       = 2e-4
 CLIP_EPS        = 0.2
 VAL_COEF        = 0.5
+VALUE_CLIP      = 0.2
 PPO_EPOCHS      = 4
-MINI_BATCH      = 64      # turns per mini-batch (variable E handled via loop)
-ACTION_THRESHOLD = 0.35   # execute edges above this; only primary used for PPO
+MINI_BATCH      = 64
+ACTION_THRESHOLD = 0.35
 TOP_K_EDGES      = 5
 
-ENT_COEF = 0.01  # fixed entropy bonus — adaptive alpha kept hitting its ceiling
+ENT_COEF = 0.005
+
+TARGET_KL       = 0.02
+KL_STOP_MULT    = 1.5
+
+TERMINAL_WIN      = 1.0
+TERMINAL_LOSS     = -1.0
+TERMINAL_DRAW     = 0.0
+
+FORCE_1V1 = True   # all training games are 1v1 — faster, cleaner signal, 50% win baseline
 
 # ── Critic warm-up ─────────────────────────────────────────────────────────
 # Fresh critic gives noisy value estimates → noisy advantages → bad PPO.
@@ -187,6 +197,8 @@ class TransformerRolloutBuffer:
         self.rewards     = []   # float
         self.dones       = []   # float  0/1
         self.values      = []   # float  V(s)
+        self.total_shaped = 0.0
+        self.terminal_bonus = 0.0
 
     def add(self, turn_feats: np.ndarray, chosen_idx: int,
             log_prob: float, reward: float, done: bool, value: float):
@@ -196,6 +208,7 @@ class TransformerRolloutBuffer:
         self.rewards.append(float(reward))
         self.dones.append(float(done))
         self.values.append(float(value))
+        self.total_shaped += float(reward)
 
     def compute_gae(self, last_value: float = 0.0):
         advantages, returns = [], []
@@ -223,12 +236,12 @@ def _build_moves(obs: dict, actor: EdgeTransformerNet, device: str):
     """
     Score all candidate edges with the actor.  Return:
       turn_feats  : (E, 81) numpy
-      chosen_idx  : int   (primary sampled edge index)
+      chosen_idx  : int   (primary sampled edge — used for PPO log_prob)
       log_prob    : float
-      moves       : list of [src, angle, ships] for the game env
+      moves       : list of [src, angle, ships] — top-K edges above threshold,
+                    same execution as submission (train matches inference)
     Returns (None, None, None, []) if no candidates.
     """
-    import math as _math
     from main import build_world
 
     candidates = build_all_candidate_edges(obs)
@@ -252,7 +265,7 @@ def _build_moves(obs: dict, actor: EdgeTransformerNet, device: str):
         chosen_idx = int(chosen_t.item())
         log_prob   = float(dist.log_prob(chosen_t).item())
 
-    # Build actual moves via physics (plan_shot)
+    # Execute top-K edges above threshold — identical to submission agent
     try:
         world      = build_world(obs)
         planet_map = {p.id: p for p in world.planets}
@@ -260,13 +273,12 @@ def _build_moves(obs: dict, actor: EdgeTransformerNet, device: str):
         moves      = []
         committed  = 0
 
-        # Sort by action prob so primary edge goes first
         order = sorted(range(len(edge_list)), key=lambda i: -act_prob[i])
         for i in order:
             if committed >= TOP_K_EDGES:
                 break
             if act_prob[i] < ACTION_THRESHOLD and i != chosen_idx:
-                continue   # always include primary edge even if below threshold
+                continue
             src_id, tgt_id = edge_list[i]
             src = planet_map.get(src_id)
             tgt = planet_map.get(tgt_id)
@@ -279,9 +291,8 @@ def _build_moves(obs: dict, actor: EdgeTransformerNet, device: str):
             shot = world.plan_shot(src_id, tgt_id, send)
             if shot is None:
                 continue
-            angle = shot[0]
             spent[src_id] += send
-            moves.append([src_id, float(angle), send])
+            moves.append([src_id, float(shot[0]), send])
             committed += 1
     except Exception:
         moves = []
@@ -378,8 +389,15 @@ def play_game_collect(actor: EdgeTransformerNet,
     winner  = -1 if max_r <= 0 else rewards.index(max_r)
 
     if buf.rewards:
-        buf.rewards[-1] += 1.0 if winner == 0 else -0.5
-        buf.dones[-1]   = True
+        if winner == 0:
+            term = TERMINAL_WIN
+        elif winner < 0:
+            term = TERMINAL_DRAW
+        else:
+            term = TERMINAL_LOSS
+        buf.terminal_bonus = term
+        buf.rewards[-1] += term
+        buf.dones[-1] = True
 
     outcome = "WIN" if winner == 0 else ("DRAW" if winner < 0 else "LOSS")
     return buf, outcome
@@ -402,94 +420,120 @@ def ppo_update(actor: EdgeTransformerNet,
       The actor forward still runs (for log-probs), but its gradients
       are not applied.
     """
+    _empty = {"loss": 0.0, "entropy": 0.0, "kl": 0.0, "clipfrac": 0.0, "vloss": 0.0}
     if not bufs:
-        return 0.0, 0.0
+        return _empty
 
-    # ── Collect all transitions from all games ────────────────────────────
-    all_tf   = []
-    all_ci   = []
-    all_oldp = []
-    all_ret  = []
-    all_adv  = []
+    all_tf, all_ci, all_oldp, all_oldv = [], [], [], []
+    all_ret, all_adv = [], []
 
     for buf in bufs:
         if len(buf) < 2:
             continue
         rets, advs = buf.compute_gae(last_value=0.0)
-        for tf, ci, op, ret, adv in zip(
-                buf.turn_feats, buf.chosen_idxs, buf.log_probs,
+        for tf, ci, op, ov, ret, adv in zip(
+                buf.turn_feats, buf.chosen_idxs, buf.log_probs, buf.values,
                 rets, advs):
             all_tf.append(tf)
             all_ci.append(ci)
             all_oldp.append(op)
+            all_oldv.append(ov)
             all_ret.append(ret)
             all_adv.append(adv)
 
     if not all_tf:
-        return 0.0, 0.0
+        return _empty
 
     N = len(all_tf)
-    old_lp  = torch.FloatTensor(all_oldp).to(device)
+    old_lp = torch.FloatTensor(all_oldp).to(device)
+    old_v = torch.FloatTensor(all_oldv).to(device)
     returns = torch.FloatTensor(all_ret).to(device)
     adv_all = torch.FloatTensor(all_adv).to(device)
     adv_all = (adv_all - adv_all.mean()) / (adv_all.std() + 1e-8)
 
-    total_loss = total_ent = 0.0
-    n_updates  = 0
+    total_loss = total_ent = total_kl = total_clip = total_vloss = 0.0
+    n_updates = 0
 
-    actor.train(); critic.train()
+    actor.train()
+    critic.train()
 
     for _ in range(PPO_EPOCHS):
         idxs = list(range(N))
         random.shuffle(idxs)
+        stop_epoch = False
 
         for start in range(0, N, MINI_BATCH):
             batch = idxs[start:start + MINI_BATCH]
 
-            # ── per-turn forward (variable E — cannot stack) ───────────────
-            new_log_ps  = []
-            entropies   = []
-            values_list = []
+            new_log_ps, entropies, values_list = [], [], []
             for b in batch:
-                tf = torch.from_numpy(all_tf[b]).unsqueeze(0).to(device)   # (1, E, 81)
+                tf = torch.from_numpy(all_tf[b]).unsqueeze(0).to(device)
                 al, _ = actor(tf, pad_mask=None)
-                logits = al.squeeze(0).squeeze(-1)                          # (E,)
-                dist   = torch.distributions.Categorical(logits=logits)
-                ci     = torch.tensor(all_ci[b], device=device)
+                logits = al.squeeze(0).squeeze(-1)
+                dist = torch.distributions.Categorical(logits=logits)
+                ci = torch.tensor(all_ci[b], device=device)
                 new_log_ps.append(dist.log_prob(ci))
                 entropies.append(dist.entropy())
-                values_list.append(critic(tf).squeeze(0))                   # scalar
+                values_list.append(critic(tf).squeeze(0))
 
-            new_lp  = torch.stack(new_log_ps)        # (batch,)
-            entropy = torch.stack(entropies).mean()   # scalar
-            values  = torch.stack(values_list)        # (batch,)
+            new_lp = torch.stack(new_log_ps)
+            entropy = torch.stack(entropies).mean()
+            values = torch.stack(values_list)
 
-            # ── Loss ───────────────────────────────────────────────────────
-            L_val = F.mse_loss(values, returns[batch])
+            v_old = old_v[batch]
+            v_clipped = v_old + torch.clamp(values - v_old, -VALUE_CLIP, VALUE_CLIP)
+            L_val = torch.max(
+                (values - returns[batch]).pow(2),
+                (v_clipped - returns[batch]).pow(2),
+            ).mean()
+
             if freeze_actor:
                 loss = VAL_COEF * L_val
+                ratio = torch.ones_like(new_lp)
             else:
-                ratio  = torch.exp(new_lp - old_lp[batch])
-                adv_b  = adv_all[batch]
+                ratio = torch.exp(new_lp - old_lp[batch])
+                adv_b = adv_all[batch]
                 L_clip = torch.min(
                     ratio * adv_b,
-                    torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * adv_b
+                    torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * adv_b,
                 ).mean()
                 loss = -L_clip + VAL_COEF * L_val - ENT_COEF * entropy
 
+            with torch.no_grad():
+                approx_kl = ((ratio - 1) - torch.log(ratio.clamp(min=1e-8))).mean()
+                clipfrac = (torch.abs(ratio - 1.0) > CLIP_EPS).float().mean()
+
             optimizer.zero_grad()
             loss.backward()
-            grad_params = (list(critic.parameters()) if freeze_actor
-                           else list(actor.parameters()) + list(critic.parameters()))
+            grad_params = (
+                list(critic.parameters()) if freeze_actor
+                else list(actor.parameters()) + list(critic.parameters())
+            )
             nn.utils.clip_grad_norm_(grad_params, 0.5)
             optimizer.step()
 
             total_loss += loss.item()
-            total_ent  += entropy.item()
-            n_updates  += 1
+            total_ent += entropy.item()
+            total_kl += approx_kl.item()
+            total_clip += clipfrac.item()
+            total_vloss += L_val.item()
+            n_updates += 1
+
+            if not freeze_actor and approx_kl.item() > TARGET_KL * KL_STOP_MULT:
+                stop_epoch = True
+                break
+
+        if stop_epoch:
+            break
 
     n = max(1, n_updates)
-    return total_loss / n, total_ent / n
+    return {
+        "loss": total_loss / n,
+        "entropy": total_ent / n,
+        "kl": total_kl / n,
+        "clipfrac": total_clip / n,
+        "vloss": total_vloss / n,
+    }
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -520,7 +564,7 @@ def train(n_rounds:        int  = N_ROUNDS,
     critic = TransformerCritic().to(device)
 
     # ── Resume from transformer checkpoint if available ────────────────────
-    best_wr        = 0.0
+    best_wr_ppo    = 0.0
     start_rnd      = 1
     avg_loss       = 0.0
     avg_ent        = 0.0
@@ -532,11 +576,13 @@ def train(n_rounds:        int  = N_ROUNDS,
                 ckpt = torch.load(resume_path, map_location=device, weights_only=False)
                 actor.load_state_dict(ckpt["actor"])
                 critic.load_state_dict(ckpt["critic"])
-                best_wr        = ckpt.get("best_wr", 0.0)
+                best_wr_ppo    = ckpt.get("best_wr_ppo", ckpt.get("best_wr", 0.0))
+                if ckpt.get("epoch", 0) <= CRITIC_WARMUP_ROUNDS:
+                    best_wr_ppo = 0.0
                 start_rnd      = ckpt.get("epoch", 1) + 1
                 is_fresh_start = False
                 print(f"Resumed from {resume_path.name}  "
-                      f"(round {start_rnd-1}, best_wr={best_wr:.1%})")
+                      f"(round {start_rnd-1}, best_wr_ppo={best_wr_ppo:.1%})")
                 print(f"  Critic: loaded from checkpoint — warm-up skipped.")
                 break
             except Exception as e:
@@ -578,6 +624,7 @@ def train(n_rounds:        int  = N_ROUNDS,
     print(f"  LR actor={LR_ACTOR}  LR critic={LR_CRITIC}")
     print(f"  ENT_COEF={ENT_COEF} (fixed)  CLIP_EPS={CLIP_EPS}")
     print(f"  Critic warm-up: first {CRITIC_WARMUP_ROUNDS} rounds actor is frozen")
+    print(f"  FORCE_1V1={FORCE_1V1}  Terminal win/loss={TERMINAL_WIN}/{TERMINAL_LOSS}")
     print("=" * 60)
 
     no_improve = 0
@@ -587,17 +634,15 @@ def train(n_rounds:        int  = N_ROUNDS,
         all_bufs: list = []
 
         for g in range(games_per_round):
-            # Alternate 1v1 / 4p FFA so RL fine-tunes both modes.
-            # 1v1 games: 1 enemy  (is_1v1=1 features → network uses 1v1 weights)
-            # 4p games : 3 enemies (is_4v4=1 features → network uses 4p weights)
-            # Ratio: every 3rd game is 1v1, rest are 4p FFA.
-            if g % 3 == 0:
-                # 1v1 game
-                filler = random.choice(enemies)
-                fns    = [None, filler[1]]
+            if FORCE_1V1:
+                filler   = random.choice(enemies)
+                fns      = [None, filler[1]]
+                mode_tag = "1v1"
+            elif g % 3 == 0:
+                filler   = random.choice(enemies)
+                fns      = [None, filler[1]]
                 mode_tag = "1v1"
             else:
-                # 4p FFA game
                 fillers  = random.choices(enemies, k=min(3, len(enemies)))
                 fns      = [None] + [fn for _, fn in fillers]
                 mode_tag = "4p"
@@ -627,40 +672,58 @@ def train(n_rounds:        int  = N_ROUNDS,
         # Warm-up only on a fresh start (no prior checkpoint).
         # When resuming, the critic is already calibrated — skip immediately.
         freeze_actor = is_fresh_start and ((rnd - 1) < CRITIC_WARMUP_ROUNDS)
-        avg_loss, avg_ent = ppo_update(
+        stats = ppo_update(
             actor, critic, optimizer,
             all_bufs, device,
             freeze_actor=freeze_actor)
+        if isinstance(stats, dict):
+            avg_loss = stats["loss"]
+            avg_ent = stats["entropy"]
+            avg_kl = stats["kl"]
+        else:
+            avg_loss, avg_ent = stats
+            avg_kl = 0.0
+            stats = {"clipfrac": 0.0}
+        wr = wins / max(1, games_per_round)
+        tag = ""
+        shaped_sum = sum(getattr(b, "total_shaped", 0.0) for b in all_bufs)
+        term_sum   = sum(getattr(b, "terminal_bonus", 0.0) for b in all_bufs)
+
         for buf in all_bufs:
             buf.clear()
 
-        wr = wins / max(1, games_per_round)
-        tag = ""
-
         ckpt = {
-            "epoch":   rnd,
-            "best_wr": max(wr, best_wr),
-            "loss":    avg_loss,
+            "epoch": rnd,
+            "best_wr": best_wr_ppo,
+            "best_wr_ppo": best_wr_ppo,
+            "loss": avg_loss,
             "entropy": avg_ent,
-            "actor":   actor.state_dict(),
-            "critic":  critic.state_dict(),
+            "kl": avg_kl,
+            "actor": actor.state_dict(),
+            "critic": critic.state_dict(),
         }
         torch.save(ckpt, SAVE_PATH)
 
-        if wr > best_wr:
-            best_wr    = wr
+        if not freeze_actor and wr > best_wr_ppo:
+            best_wr_ppo = wr
             no_improve = 0
+            ckpt["best_wr"] = best_wr_ppo
+            ckpt["best_wr_ppo"] = best_wr_ppo
             torch.save(ckpt, BEST_PATH)
-            tag = f"  *** best ({wr:.1%}) -> transformer_best.pt"
+            tag = f"  *** best PPO ({wr:.1%}) -> transformer_best.pt"
         else:
             no_improve += 1
-            tag = f"  (no improve, best={best_wr:.1%}, streak={no_improve})"
+            if freeze_actor:
+                tag = f"  [warmup — best PPO stays {best_wr_ppo:.1%}]"
+            else:
+                tag = f"  (no improve, best PPO={best_wr_ppo:.1%}, streak={no_improve})"
 
         warmup_str = "  [critic warmup — actor frozen]" if freeze_actor else ""
-        print(f"\n  -> WR={wr:.1%}  loss={avg_loss:.4f}  "
-              f"ent={avg_ent:.4f}{warmup_str}{tag}")
+        print(f"\n  -> WR={wr:.1%}  loss={avg_loss:.4f}  ent={avg_ent:.4f}  "
+              f"kl={avg_kl:.4f}  clip={stats.get('clipfrac', 0.0):.3f}  "
+              f"shaped={shaped_sum:.1f}  terminal={term_sum:.1f}{warmup_str}{tag}")
 
-    print(f"\nDone. Best WR={best_wr:.1%}")
+    print(f"\nDone. Best PPO WR={best_wr_ppo:.1%}")
     return actor, critic
 
 
