@@ -144,17 +144,114 @@
       "samples": 987568,
       "ok": 500,
       "fail": 0
+    },
+    "29": {
+      "samples": 1005928,
+      "ok": 500,
+      "fail": 0
+    },
+    "30": {
+      "samples": 894972,
+      "ok": 500,
+      "fail": 0
+    },
+    "31": {
+      "samples": 688696,
+      "ok": 499,
+      "fail": 1
+    },
+    "32": {
+      "samples": 872256,
+      "ok": 500,
+      "fail": 0
+    },
+    "33": {
+      "samples": 791344,
+      "ok": 500,
+      "fail": 0
+    },
+    "34": {
+      "samples": 850396,
+      "ok": 500,
+      "fail": 0
+    },
+    "35": {
+      "samples": 942916,
+      "ok": 500,
+      "fail": 0
+    },
+    "36": {
+      "samples": 950048,
+      "ok": 500,
+      "fail": 0
+    },
+    "37": {
+      "samples": 939748,
+      "ok": 499,
+      "fail": 1
+    },
+    "38": {
+      "samples": 908384,
+      "ok": 500,
+      "fail": 0
+    },
+    "39": {
+      "samples": 831684,
+      "ok": 499,
+      "fail": 1
+    },
+    "40": {
+      "samples": 779520,
+      "ok": 500,
+      "fail": 0
+    },
+    "41": {
+      "samples": 728020,
+      "ok": 500,
+      "fail": 0
+    },
+    "42": {
+      "samples": 618168,
+      "ok": 500,
+      "fail": 0
+    },
+    "43": {
+      "samples": 756676,
+      "ok": 499,
+      "fail": 1
+    },
+    "44": {
+      "samples": 733520,
+      "ok": 500,
+      "fail": 0
+    },
+    "45": {
+      "samples": 664228,
+      "ok": 500,
+      "fail": 0
+    },
+    "46": {
+      "samples": 733784,
+      "ok": 500,
+      "fail": 0
+    },
+    "47": {
+      "samples": 486356,
+      "ok": 289,
+      "fail": 1
     }
   },
   "total_replays": 23790,
-  "batches_done": 29,
+  "batches_done": 48,
   "total_batches": 48,
-  "total_ok": 14492,
-  "total_fail": 8,
-  "total_samples": 25258352,
-  "n2_games": 8836,
-  "n4_games": 5656,
+  "total_ok": 23777,
+  "total_fail": 13,
+  "total_samples": 40434996,
+  "n2_games": 16486,
+  "n4_games": 7291,
   "feature_dim": 96,
   "neg_ratio": 3,
-  "status": "in_progress"
+  "status": "done",
+  "output_path": "C:\\projects\\OrbitsWar\\imitation\\dataset.npz",
+  "output_mb": 2380.8
 }

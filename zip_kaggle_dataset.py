@@ -278,28 +278,38 @@ def build_rl_zip(out_path: Path):
 
 def build_dataset_zip(out_path: Path):
     """
-    Zips imitation/dataset.npz.
-    Run after extract_dataset.py finishes.
+    Zips the dataset for Kaggle upload.
+    Prefers dataset_f16.npz (uncompressed float16, mmap-compatible) over
+    dataset.npz (compressed float32). Run convert_dataset_f16.py first for
+    memory-efficient Kaggle training.
     """
     stats = {"files": 0, "bytes": 0}
     print(f"\n{'='*60}")
     print(f"  Building {out_path.name}")
     print(f"{'='*60}")
 
-    npz = ROOT / "imitation" / "dataset.npz"
-    if not npz.exists():
-        print(f"  [SKIP] imitation/dataset.npz not found.")
-        print("  Wait for extract_dataset.py to finish, then re-run.")
+    # Prefer float16 uncompressed version (works with mmap_mode on Kaggle)
+    npz_f16 = ROOT / "imitation" / "dataset_f16.npz"
+    npz     = ROOT / "imitation" / "dataset.npz"
+
+    if npz_f16.exists():
+        npz = npz_f16
+        print(f"  Using dataset_f16.npz (float16, uncompressed — mmap-compatible)")
+    elif not npz.exists():
+        print(f"  [SKIP] Neither dataset_f16.npz nor dataset.npz found.")
+        print("  Run: python imitation/extract_dataset.py")
+        print("  Then: python imitation/convert_dataset_f16.py  (recommended)")
         return None
 
     sz_mb = npz.stat().st_size / 1e6
-    print(f"  Zipping dataset.npz  ({sz_mb:.1f} MB) ...")
+    arc   = "dataset_f16.npz" if npz.name == "dataset_f16.npz" else "dataset.npz"
+    print(f"  Zipping {npz.name}  ({sz_mb:.0f} MB) ...")
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        _add_file(zf, npz, "dataset.npz", stats, quiet=True)
+        _add_file(zf, npz, arc, stats, quiet=True)
 
     mb = out_path.stat().st_size / 1e6
     ratio = sz_mb / mb if mb > 0 else 0
-    print(f"  Done: {sz_mb:.1f} MB -> {mb:.1f} MB compressed  (ratio {ratio:.1f}x)")
+    print(f"  Done: {sz_mb:.0f} MB -> {mb:.0f} MB  (ratio {ratio:.1f}x)")
     return stats
 
 
@@ -460,10 +470,10 @@ Workflow
   Step 1 (now):      python zip_kaggle_dataset.py --src
                      Upload orbitswar-src.zip as dataset 'orbitswar-src'
 
-  Step 2 (after extraction finishes):
+  Step 2 (dataset):  Rename dataset_f16.npz -> dataset.npz locally
                      python zip_kaggle_dataset.py --dataset
                      Upload orbitswar-dataset.zip as dataset 'orbitswar-dataset'
-                     Run train_imitation_kaggle.ipynb on Kaggle GPU (~3h)
+                     Run train_imitation_kaggle.ipynb on Kaggle GPU
 
   Step 3 (after imitation training):
                      Download best_model.pt -> imitation/checkpoints/
@@ -472,7 +482,7 @@ Workflow
                      Run train_transformer_ppo.ipynb on Kaggle GPU
         """)
     parser.add_argument("--src",        action="store_true", help="Source code + notebooks")
-    parser.add_argument("--dataset",    action="store_true", help="dataset.npz (after extraction)")
+    parser.add_argument("--dataset",    action="store_true", help="dataset.npz (float16 uncompressed)")
     parser.add_argument("--models",     action="store_true", help="Model checkpoints (after training)")
     parser.add_argument("--enemies",    action="store_true", help="Enemy agents (incl. weights) for tournament")
     parser.add_argument("--submission", action="store_true", help="Imitation-only competition zip")

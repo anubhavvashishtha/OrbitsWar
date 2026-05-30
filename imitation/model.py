@@ -160,31 +160,35 @@ class TurnDataset(Dataset):
     """
     Groups flat edge samples into per-turn sets.
 
-    Each item = all edges from ONE game turn (one replay + step pair).
-    The Transformer needs the full edge set so attention runs across
-    every move the winner could have taken in that turn.
+    X is kept as a NumPy array (or memmap) and never converted to a Tensor
+    upfront — so a 15 GB memory-mapped X does not exhaust CPU RAM.
+    Each __getitem__ fetches only the rows for that turn (~20 rows × 96 floats).
 
-    Memory layout: flat X / label arrays are kept as-is (shared with
-    NumPy, no copy).  Only per-turn index lists are extra overhead.
+    global_row_map: maps local indices 0..N_split-1 → row indices in X_full.
+    Pass it when X is the full dataset mmap and labels are already split-sliced.
+    If None, X is assumed to already be the split (backward-compatible).
 
     turn_id = replay_id * 10_000 + step   (unique per turn).
     """
 
     def __init__(self,
-                 X:          np.ndarray,   # (N, 96) float32
-                 y_action:   np.ndarray,   # (N,)    int8
-                 y_fraction: np.ndarray,   # (N,)    float32, NaN for negatives
-                 replay_ids: np.ndarray,   # (N,)    int32
-                 step_ids:   np.ndarray):  # (N,)    int16
+                 X:             np.ndarray,        # (N_full, 96) float16 or float32 — may be a memmap
+                 y_action:      np.ndarray,        # (N_split,)   int8
+                 y_fraction:    np.ndarray,        # (N_split,)   float32, NaN for negatives
+                 replay_ids:    np.ndarray,        # (N_split,)   int32
+                 step_ids:      np.ndarray,        # (N_split,)   int16
+                 global_row_map: np.ndarray = None):  # (N_split,) int64
 
-        # Flat tensors (shared memory)
-        self._X          = torch.from_numpy(X).float()
+        # X stays as numpy — no 15 GB tensor allocation
+        self._X             = X
+        self._global_row_map = global_row_map
+
         y_frac_clean     = np.where(np.isnan(y_fraction), 0.0, y_fraction)
         self._y_action   = torch.from_numpy(y_action.astype(np.float32))
         self._y_fraction = torch.from_numpy(y_frac_clean.astype(np.float32))
         self._has_frac   = torch.from_numpy((~np.isnan(y_fraction)).astype(np.float32))
 
-        # Group sample indices by turn
+        # Group sample indices by turn (local indices within this split)
         turn_ids = replay_ids.astype(np.int64) * 10_000 + step_ids.astype(np.int64)
         groups: dict = defaultdict(list)
         for i, tid in enumerate(turn_ids):
@@ -201,12 +205,16 @@ class TurnDataset(Dataset):
         return len(self._turns)
 
     def __getitem__(self, idx: int):
-        idxs = self._turns[idx]
+        local_idxs = self._turns[idx]
+        row_idxs   = (self._global_row_map[local_idxs]
+                      if self._global_row_map is not None else local_idxs)
+        # .copy() required for mmap arrays; .float() upcasts float16 → float32
+        x = torch.from_numpy(self._X[row_idxs].copy()).float()
         return (
-            self._X[idxs],            # (E, 96)
-            self._y_action[idxs],     # (E,)
-            self._y_fraction[idxs],   # (E,)
-            self._has_frac[idxs],     # (E,)
+            x,
+            self._y_action[local_idxs],     # (E,)
+            self._y_fraction[local_idxs],   # (E,)
+            self._has_frac[local_idxs],     # (E,)
         )
 
 
@@ -306,6 +314,8 @@ def train(
     fraction_loss_weight: float = 0.5,
     seed:                 int   = 42,
     device:               str   = 'auto',
+    num_workers:          int   = 0,
+    pretrained_path:      str   = None,     # load weights from previous part checkpoint
 ):
     """
     Train EdgeTransformerNet on turn-grouped batches.
@@ -324,14 +334,18 @@ def train(
 
     # ── load data ────────────────────────────────────────────────────────────
     print(f"Loading {dataset_path} ...")
-    d          = np.load(dataset_path)
-    X          = d['X']
-    y_action   = d['y_action']
-    y_fraction = d['y_fraction']
-    replay_ids = d['replay'] if 'replay' in d else np.zeros(len(X), dtype=np.int32)
-    step_ids   = d['step']   if 'step'   in d else np.zeros(len(X), dtype=np.int16)
+    # mmap_mode='r': X is memory-mapped from disk — no 15 GB RAM allocation.
+    # Only the rows needed per batch are paged in during training.
+    d          = np.load(dataset_path, mmap_mode='r')
+    X          = d['X']                   # (N, 96) memmap — stays on disk (float16 or float32)
+    y_action   = d['y_action'][:]         # ~40 MB  — load fully
+    y_fraction = d['y_fraction'][:]       # ~160 MB — load fully
+    replay_ids = (d['replay'][:] if 'replay' in d
+                  else np.zeros(len(y_action), dtype=np.int32))
+    step_ids   = (d['step'][:]   if 'step'   in d
+                  else np.zeros(len(y_action), dtype=np.int16))
 
-    print(f"  Samples: {len(X):,}  "
+    print(f"  Samples: {len(y_action):,}  "
           f"Positives: {y_action.sum():,} ({y_action.mean()*100:.1f}%)")
 
     # ── train/val split by replay ─────────────────────────────────────────────
@@ -345,25 +359,47 @@ def train(
     tr_mask  = np.array([int(r) in train_set for r in replay_ids])
     val_mask = ~tr_mask
 
+    # Integer index arrays so TurnDataset can fetch from mmap without copying X
+    tr_indices  = np.where(tr_mask)[0].astype(np.int64)
+    val_indices = np.where(val_mask)[0].astype(np.int64)
+
     print("Building TurnDataset (train) ...")
-    tr_ds  = TurnDataset(X[tr_mask],  y_action[tr_mask],  y_fraction[tr_mask],
-                         replay_ids[tr_mask],  step_ids[tr_mask])
+    tr_ds  = TurnDataset(X, y_action[tr_mask],  y_fraction[tr_mask],
+                         replay_ids[tr_mask],  step_ids[tr_mask],
+                         global_row_map=tr_indices)
     print("Building TurnDataset (val) ...")
-    val_ds = TurnDataset(X[val_mask], y_action[val_mask], y_fraction[val_mask],
-                         replay_ids[val_mask], step_ids[val_mask])
+    val_ds = TurnDataset(X, y_action[val_mask], y_fraction[val_mask],
+                         replay_ids[val_mask], step_ids[val_mask],
+                         global_row_map=val_indices)
 
     print(f"  Turns train={len(tr_ds):,}  val={len(val_ds):,}  ({n_val} val replays)")
 
+    pin = (device == 'cuda')
     tr_loader  = DataLoader(tr_ds,  batch_size=batch_size,  shuffle=True,
-                            collate_fn=collate_turns, num_workers=0)
+                            collate_fn=collate_turns, num_workers=num_workers,
+                            pin_memory=pin, persistent_workers=(num_workers > 0))
     val_loader = DataLoader(val_ds, batch_size=batch_size,  shuffle=False,
-                            collate_fn=collate_turns, num_workers=0)
+                            collate_fn=collate_turns, num_workers=num_workers,
+                            pin_memory=pin, persistent_workers=(num_workers > 0))
 
     # ── model ─────────────────────────────────────────────────────────────────
     model = EdgeTransformerNet(
         d_model=d_model, nhead=nhead,
         num_layers=num_layers, dropout=dropout,
     ).to(device)
+
+    # Load pretrained weights if continuing from a previous part
+    if pretrained_path is not None:
+        import os
+        if os.path.exists(pretrained_path):
+            ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
+            state = ckpt.get('model_state', ckpt)
+            model.load_state_dict(state)
+            prev_val = ckpt.get('val_loss', float('nan'))
+            print(f"  Loaded pretrained weights from {pretrained_path}  "
+                  f"(prev val_loss={prev_val:.4f})")
+        else:
+            print(f"  WARNING: pretrained_path not found: {pretrained_path} — starting fresh")
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  Parameters: {n_params:,}")
@@ -466,8 +502,9 @@ def train(
             print(f"  saved best (val={val_avg:.4f})")
         torch.save(ckpt, out_dir / 'latest_model.pt')
 
-    with open(out_dir / 'training_history.json', 'w') as f:
-        json.dump(history, f, indent=2)
+        with open(out_dir / 'training_history.json', 'w') as f:
+            json.dump(history, f, indent=2)
+
     print(f"\nBest val loss: {best_val_loss:.4f}  checkpoints -> {out_dir}")
     return model, history
 

@@ -325,7 +325,8 @@ def extract_dataset(replay_dir: str, out_path: str,
                     neg_ratio: int = 3,
                     max_replays: Optional[int] = None,
                     workers: int = 1,
-                    batch_size: int = 500):
+                    batch_size: int = 500,
+                    skip_merge: bool = False):
     """
     Process replays in batches of batch_size.
     Each batch is saved as _chunks/chunk_NNNN.npz immediately → frees RAM.
@@ -422,6 +423,14 @@ def extract_dataset(replay_dir: str, out_path: str,
         # free batch memory immediately
         del arrays
 
+    # ── skip merge if requested (use split_chunks.py to create part files) ──
+    if skip_merge:
+        print(f"\n--skip_merge set: chunks kept in {chunk_dir}")
+        print(f"Run:  python imitation/split_chunks.py --n_parts 5")
+        meta['status'] = 'chunks_only'
+        _save_meta(meta)
+        return
+
     # ── merge all chunks into final dataset.npz ───────────────────────────
     print(f"\nMerging {len(chunk_paths)} chunks → {out_path} ...")
 
@@ -438,7 +447,7 @@ def extract_dataset(replay_dir: str, out_path: str,
             all_parts[k].append(data[k])
         del data   # free each chunk after reading
 
-    if not any(all_parts['X']):
+    if not all_parts['X']:
         print("ERROR: no valid data in any chunk.")
         return
 
@@ -504,6 +513,9 @@ if __name__ == '__main__':
     parser.add_argument('--workers',     type=int, default=1)
     parser.add_argument('--batch_size',  type=int, default=500,
                         help='Replays per batch (lower = less RAM, default 500)')
+    parser.add_argument('--skip_merge',  action='store_true',
+                        help='Stop after creating chunks — do not merge into dataset.npz. '
+                             'Use split_chunks.py afterwards to create balanced part files.')
     args = parser.parse_args()
 
     if args.replay_file:
@@ -511,4 +523,5 @@ if __name__ == '__main__':
     else:
         extract_dataset(args.replay_dir, args.out_path,
                         args.neg_ratio, args.max_replays,
-                        args.workers, args.batch_size)
+                        args.workers, args.batch_size,
+                        skip_merge=args.skip_merge)
