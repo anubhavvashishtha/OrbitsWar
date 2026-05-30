@@ -10,20 +10,27 @@ Each negative sample = an (src, tgt) edge the winner COULD have taken
 
 Usage:
     # Full extraction (defaults to records/ → imitation/dataset.npz):
-    python extract_dataset.py
+    python imitation/extract_dataset.py
 
-    # Custom paths:
-    python extract_dataset.py \
-        --replay_dir /path/to/replays \
-        --out_path   dataset.npz \
-        --neg_ratio  3 \
-        --workers    4
+    # Custom batch size (fewer replays in RAM at once):
+    python imitation/extract_dataset.py --batch_size 500
+
+    # Parallel workers:
+    python imitation/extract_dataset.py --batch_size 500 --workers 4
 
     # Quick single-file test:
-    python extract_dataset.py --replay_file /path/to/replay.json
+    python imitation/extract_dataset.py --replay_file /path/to/replay.json
+
+Batch mode
+----------
+Replays are processed in chunks of --batch_size.  Each chunk is saved to
+imitation/_chunks/chunk_NNNN.npz immediately, then the batch is freed from RAM.
+If the script is interrupted, re-running skips completed chunks automatically.
+After all chunks are done they are merged into the final dataset.npz and the
+_chunks/ directory is deleted.  dataset_meta.json is updated after every batch.
 
 Output (dataset.npz):
-    X            float32  (N, 81)  — feature vectors
+    X            float32  (N, 96)  — feature vectors
     y_action     int8     (N,)     — 1 = winner took this edge, 0 = didn't
     y_fraction   float32  (N,)     — ship fraction sent (NaN for negatives)
     step         int16    (N,)     — game step
@@ -38,6 +45,7 @@ import argparse
 import json
 import math
 import os
+import shutil
 import sys
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -227,124 +235,235 @@ def _worker(args):
         return file_idx, None, str(e)
 
 
-# ── batch extractor ────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────
 
-def extract_dataset(replay_dir: str, out_path: str,
-                    neg_ratio: int = 3,
-                    max_replays: Optional[int] = None,
-                    workers: int = 1):
+META_PATH = Path(__file__).parent / "dataset_meta.json"
 
-    replay_dir = Path(replay_dir)
-    files = sorted(replay_dir.glob('*.json'))
-    if max_replays:
-        files = files[:max_replays]
+def _load_meta():
+    if META_PATH.exists():
+        try:
+            return json.loads(META_PATH.read_text())
+        except Exception:
+            pass
+    return {}
 
-    print(f"Found {len(files)} replay files in {replay_dir}")
-    print(f"neg_ratio={neg_ratio}, workers={workers}")
+def _save_meta(meta: dict):
+    META_PATH.write_text(json.dumps(meta, indent=2))
 
-    # results[file_idx] = (X, y_act, y_frac, step_arr, n_ag, winner_id)
+
+def _process_batch(batch_files, neg_ratio, global_offset, workers):
+    """Process a list of replay files, return assembled arrays."""
     results = {}
     ok = fail = 0
-    n2_games = n4_games = 0
-    done_count = 0
+    n2 = n4 = 0
 
     if workers <= 1:
-        # ── sequential ────────────────────────────────────────────────────
-        rng = np.random.default_rng(42)
-        for i, fpath in enumerate(files):
+        rng = np.random.default_rng(global_offset)
+        for local_i, fpath in enumerate(batch_files):
             try:
                 result = extract_replay(str(fpath), neg_ratio, rng)
-                results[i] = result
+                results[local_i] = result
                 if result[0].shape[0] == 0:
                     fail += 1
                 else:
                     ok += 1
-                    if result[4] == 2: n2_games += 1
-                    else:              n4_games += 1
+                    if result[4] == 2: n2 += 1
+                    else:              n4 += 1
             except Exception as e:
                 fail += 1
-                if fail <= 5:
-                    print(f"  ERROR {fpath.name}: {e}")
-            done_count += 1
-            if done_count % 100 == 0:
-                done_samp = sum(results[j][0].shape[0]
-                                for j in results if results[j][0].shape[0] > 0)
-                print(f"  [{done_count}/{len(files)}] ok={ok} fail={fail} "
-                      f"1v1={n2_games} 4p={n4_games} samples={done_samp:,}")
     else:
-        # ── parallel ──────────────────────────────────────────────────────
-        args_list = [(fpath, neg_ratio, i) for i, fpath in enumerate(files)]
+        args_list = [(fpath, neg_ratio, global_offset + i)
+                     for i, fpath in enumerate(batch_files)]
         with ProcessPoolExecutor(max_workers=workers) as ex:
             futures = {ex.submit(_worker, a): a[2] for a in args_list}
             for fut in as_completed(futures):
                 file_idx, result, err = fut.result()
-                done_count += 1
+                local_i = file_idx - global_offset
                 if err or result is None or result[0].shape[0] == 0:
                     fail += 1
-                    if fail <= 5 and err:
-                        print(f"  ERROR file {file_idx}: {err}")
                 else:
-                    results[file_idx] = result
+                    results[local_i] = result
                     ok += 1
-                    if result[4] == 2: n2_games += 1
-                    else:              n4_games += 1
+                    if result[4] == 2: n2 += 1
+                    else:              n4 += 1
 
-                if done_count % 100 == 0:
-                    done_samp = sum(results[j][0].shape[0] for j in results)
-                    print(f"  [{done_count}/{len(files)}] ok={ok} fail={fail} "
-                          f"1v1={n2_games} 4p={n4_games} samples={done_samp:,}")
-
-    if not results:
-        print("ERROR: no valid replays found.")
-        return
-
-    # ── assemble in original file order ───────────────────────────────────
+    # assemble in order
     all_X, all_y_act, all_y_frac = [], [], []
-    all_step, all_replay, all_n_players, all_winner = [], [], [], []
+    all_step, all_replay, all_np, all_win = [], [], [], []
 
-    for i in sorted(results):
-        X_r, y_act, y_frac, step_arr, n_ag, winner_id = results[i]
+    for local_i in sorted(results):
+        X_r, y_act, y_frac, step_arr, n_ag, winner_id = results[local_i]
         if X_r.shape[0] == 0:
             continue
+        global_i = global_offset + local_i
         n = len(y_act)
         all_X.append(X_r)
         all_y_act.append(y_act)
         all_y_frac.append(y_frac)
         all_step.append(step_arr)
-        all_replay.append(np.full(n, i,         dtype=np.int32))
-        all_n_players.append(np.full(n, n_ag,   dtype=np.int8))
-        all_winner.append(np.full(n, winner_id, dtype=np.int8))
+        all_replay.append(np.full(n, global_i,   dtype=np.int32))
+        all_np.append(np.full(n, n_ag,           dtype=np.int8))
+        all_win.append(np.full(n, winner_id,     dtype=np.int8))
 
-    X          = np.concatenate(all_X,         axis=0)
-    y_action   = np.concatenate(all_y_act,     axis=0)
-    y_fraction = np.concatenate(all_y_frac,    axis=0)
-    step_arr   = np.concatenate(all_step,      axis=0)
-    replay_arr = np.concatenate(all_replay,    axis=0)
-    n_players  = np.concatenate(all_n_players, axis=0)
-    winner_arr = np.concatenate(all_winner,    axis=0)
+    if not all_X:
+        return None, ok, fail, n2, n4
 
-    print(f"\nDone. Replays: {ok} ok, {fail} failed")
-    print(f"  1v1 games: {n2_games}   4-player games: {n4_games}")
-    print(f"Total samples: {X.shape[0]:,}")
-    print(f"  Positives: {y_action.sum():,}  ({y_action.mean()*100:.1f}%)")
-    print(f"  Negatives: {(y_action==0).sum():,}")
-    print(f"  Feature dim: {X.shape[1]}")
+    return {
+        'X':          np.concatenate(all_X),
+        'y_action':   np.concatenate(all_y_act),
+        'y_fraction': np.concatenate(all_y_frac),
+        'step':       np.concatenate(all_step),
+        'replay':     np.concatenate(all_replay),
+        'n_players':  np.concatenate(all_np),
+        'winner':     np.concatenate(all_win),
+    }, ok, fail, n2, n4
 
-    bad = ~np.isfinite(X)
-    if bad.any():
-        print(f"  WARNING: {bad.sum()} NaN/Inf values found - replacing with 0")
-        X[bad] = 0.0
 
-    out_path = Path(out_path)
+# ── batched extractor ─────────────────────────────────────────────────────
+
+def extract_dataset(replay_dir: str, out_path: str,
+                    neg_ratio: int = 3,
+                    max_replays: Optional[int] = None,
+                    workers: int = 1,
+                    batch_size: int = 500):
+    """
+    Process replays in batches of batch_size.
+    Each batch is saved as _chunks/chunk_NNNN.npz immediately → frees RAM.
+    Existing chunks are skipped (resumable after crash).
+    dataset_meta.json is updated after every batch.
+    Final step: merge all chunks → dataset.npz → delete _chunks/.
+    """
+    replay_dir = Path(replay_dir)
+    out_path   = Path(out_path)
+    chunk_dir  = out_path.parent / "_chunks"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+
+    files = sorted(replay_dir.glob('*.json'))
+    if max_replays:
+        files = files[:max_replays]
+
+    n_total  = len(files)
+    n_batches = math.ceil(n_total / batch_size)
+
+    print(f"Found {n_total} replay files in {replay_dir}")
+    print(f"Batch size  : {batch_size} replays  →  {n_batches} batches")
+    print(f"Feature dim : {N_TOTAL_FEATS}")
+    print(f"Chunks dir  : {chunk_dir}")
+    print()
+
+    meta = _load_meta()
+    total_ok = meta.get('total_ok', 0)
+    total_fail = meta.get('total_fail', 0)
+    total_samples = meta.get('total_samples', 0)
+    n2_total = meta.get('n2_games', 0)
+    n4_total = meta.get('n4_games', 0)
+
+    chunk_paths = []
+
+    for batch_idx in range(n_batches):
+        chunk_path = chunk_dir / f"chunk_{batch_idx:04d}.npz"
+        chunk_paths.append(chunk_path)
+
+        if chunk_path.exists():
+            # already done — recover stats from meta if available
+            prev = meta.get('chunks', {}).get(str(batch_idx), {})
+            print(f"  Batch {batch_idx+1}/{n_batches} — chunk exists, skipping  "
+                  f"({prev.get('samples', '?')} samples)")
+            continue
+
+        batch_start = batch_idx * batch_size
+        batch_files = files[batch_start : batch_start + batch_size]
+
+        print(f"  Batch {batch_idx+1}/{n_batches}: replays {batch_start}–"
+              f"{batch_start + len(batch_files) - 1} ...", end=' ', flush=True)
+
+        arrays, ok, fail, n2, n4 = _process_batch(
+            batch_files, neg_ratio, batch_start, workers)
+
+        if arrays is None:
+            print(f"SKIP (no valid samples)  fail={fail}")
+            # save empty marker so we don't retry
+            np.savez_compressed(chunk_path, X=np.zeros((0, N_TOTAL_FEATS), dtype=np.float32))
+        else:
+            bad = ~np.isfinite(arrays['X'])
+            if bad.any():
+                arrays['X'][bad] = 0.0
+
+            np.savez_compressed(chunk_path, **arrays)
+            n_samp = arrays['X'].shape[0]
+            print(f"ok={ok} fail={fail} 1v1={n2} 4p={n4} samples={n_samp:,}")
+
+            total_ok      += ok
+            total_fail    += fail
+            total_samples += n_samp
+            n2_total      += n2
+            n4_total      += n4
+
+            # update meta after every batch
+            if 'chunks' not in meta:
+                meta['chunks'] = {}
+            meta['chunks'][str(batch_idx)] = {'samples': n_samp, 'ok': ok, 'fail': fail}
+
+        meta.update({
+            'total_replays':     n_total,
+            'batches_done':      batch_idx + 1,
+            'total_batches':     n_batches,
+            'total_ok':          total_ok,
+            'total_fail':        total_fail,
+            'total_samples':     total_samples,
+            'n2_games':          n2_total,
+            'n4_games':          n4_total,
+            'feature_dim':       N_TOTAL_FEATS,
+            'neg_ratio':         neg_ratio,
+            'status':            'in_progress',
+        })
+        _save_meta(meta)
+
+        # free batch memory immediately
+        del arrays
+
+    # ── merge all chunks into final dataset.npz ───────────────────────────
+    print(f"\nMerging {len(chunk_paths)} chunks → {out_path} ...")
+
+    all_parts = {k: [] for k in
+                 ('X', 'y_action', 'y_fraction', 'step', 'replay', 'n_players', 'winner')}
+
+    for cp in chunk_paths:
+        if not cp.exists():
+            continue
+        data = np.load(cp)
+        if data['X'].shape[0] == 0:
+            continue
+        for k in all_parts:
+            all_parts[k].append(data[k])
+        del data   # free each chunk after reading
+
+    if not any(all_parts['X']):
+        print("ERROR: no valid data in any chunk.")
+        return
+
+    final = {k: np.concatenate(v) for k, v in all_parts.items() if v}
+    del all_parts
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        out_path,
-        X=X, y_action=y_action, y_fraction=y_fraction,
-        step=step_arr, replay=replay_arr,
-        n_players=n_players,
-        winner=winner_arr,
-    )
-    print(f"Saved to {out_path}  ({out_path.stat().st_size / 1e6:.1f} MB)")
+    np.savez_compressed(out_path, **final)
+    size_mb = out_path.stat().st_size / 1e6
+
+    print(f"Saved → {out_path}  ({size_mb:.1f} MB)")
+    print(f"Total samples : {final['X'].shape[0]:,}")
+    print(f"  Positives   : {final['y_action'].sum():,}")
+    print(f"  Feature dim : {final['X'].shape[1]}")
+
+    # update meta to done
+    meta['status'] = 'done'
+    meta['output_path'] = str(out_path)
+    meta['output_mb']   = round(size_mb, 1)
+    _save_meta(meta)
+
+    # clean up chunks
+    shutil.rmtree(chunk_dir)
+    print(f"Chunks cleaned up.")
+    print(f"dataset_meta.json updated.")
 
 
 # ── quick single-file test ────────────────────────────────────────────────
@@ -383,10 +502,13 @@ if __name__ == '__main__':
     parser.add_argument('--neg_ratio',   type=int, default=3)
     parser.add_argument('--max_replays', type=int, default=None)
     parser.add_argument('--workers',     type=int, default=1)
+    parser.add_argument('--batch_size',  type=int, default=500,
+                        help='Replays per batch (lower = less RAM, default 500)')
     args = parser.parse_args()
 
     if args.replay_file:
         _test_single(args.replay_file)
     else:
         extract_dataset(args.replay_dir, args.out_path,
-                        args.neg_ratio, args.max_replays, args.workers)
+                        args.neg_ratio, args.max_replays,
+                        args.workers, args.batch_size)

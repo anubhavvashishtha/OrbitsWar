@@ -16,6 +16,7 @@ kaggle_upload/
 *.pkl
 *.onnx
 *.safetensors
+*.npz
 
 # ── zips & archives ───────────────────────────────────────
 *.zip

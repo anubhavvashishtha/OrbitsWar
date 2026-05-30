@@ -11,7 +11,7 @@ edge (B→Y) in the same turn, enabling coordination:
 
 Architecture
 ------------
-Per-edge embedding  : split 81-dim into [global|src|tgt|edge] parts,
+Per-edge embedding  : split 96-dim into [global|src|tgt|edge] parts,
                       project each separately (64-d), fuse → d_model.
 Transformer encoder : num_layers × multi-head self-attention + FFN.
                       Pre-LN (norm_first=True) for stable training.
@@ -23,7 +23,7 @@ Training
   python model.py --dataset imitation/dataset.npz --out_dir checkpoints/
 
 Dataset format (produced by extract_dataset.py):
-  X          (N, 81) float32
+  X          (N, 96) float32
   y_action   (N,)    int8
   y_fraction (N,)    float32 — NaN for negative samples
   replay     (N,)    int32   — replay index (for grouped CV split)
@@ -53,13 +53,14 @@ class EdgeTransformerNet(nn.Module):
     Joint edge scorer via self-attention.
 
     Forward:
-        x        : (B, E, 81)  — B turns, E edges per turn (padded)
+        x        : (B, E, 96)  — B turns, E edges per turn (padded)
         pad_mask : (B, E) bool — True = padding token (ignored everywhere)
     Returns:
         action_logit   (B, E, 1)
         fraction_logit (B, E, 1)
 
     At inference pass a single turn (B=1) with pad_mask=None.
+    Feature layout: [global(31) | src_planet(24) | tgt_planet(24) | edge(17)]
     """
 
     def __init__(self,
@@ -69,19 +70,19 @@ class EdgeTransformerNet(nn.Module):
                  dropout:    float = 0.10):
         super().__init__()
 
-        # Per-component projectors — split the 81-dim vector into parts
-        # [global(31) | src_planet(18) | tgt_planet(18) | edge(14)]
+        # Per-component projectors — split the 96-dim vector into parts
+        # [global(31) | src_planet(24) | tgt_planet(24) | edge(17)]
         self.global_proj = nn.Sequential(
             nn.Linear(31, 64), nn.LayerNorm(64), nn.GELU()
         )
         self.src_proj = nn.Sequential(
-            nn.Linear(18, 64), nn.LayerNorm(64), nn.GELU()
+            nn.Linear(24, 64), nn.LayerNorm(64), nn.GELU()
         )
         self.tgt_proj = nn.Sequential(
-            nn.Linear(18, 64), nn.LayerNorm(64), nn.GELU()
+            nn.Linear(24, 64), nn.LayerNorm(64), nn.GELU()
         )
         self.edge_proj = nn.Sequential(
-            nn.Linear(14, 64), nn.LayerNorm(64), nn.GELU()
+            nn.Linear(17, 64), nn.LayerNorm(64), nn.GELU()
         )
 
         # Fuse 4 x 64 = 256 → d_model
@@ -128,14 +129,14 @@ class EdgeTransformerNet(nn.Module):
                 pad_mask: Optional[torch.Tensor] = None
                 ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        x        : (B, E, 81)
+        x        : (B, E, 96)
         pad_mask : (B, E) bool — True = padding (skipped in attention + loss)
         Returns  : action_logit (B, E, 1), fraction_logit (B, E, 1)
         """
         g = self.global_proj(x[..., :31])     # (B, E, 64)
-        s = self.src_proj(x[..., 31:49])      # (B, E, 64)
-        t = self.tgt_proj(x[..., 49:67])      # (B, E, 64)
-        e = self.edge_proj(x[..., 67:81])     # (B, E, 64)
+        s = self.src_proj(x[..., 31:55])      # (B, E, 64)
+        t = self.tgt_proj(x[..., 55:79])      # (B, E, 64)
+        e = self.edge_proj(x[..., 79:96])     # (B, E, 64)
 
         h = self.fuse(torch.cat([g, s, t, e], dim=-1))          # (B, E, d_model)
         h = self.transformer(h, src_key_padding_mask=pad_mask)   # (B, E, d_model)
@@ -170,7 +171,7 @@ class TurnDataset(Dataset):
     """
 
     def __init__(self,
-                 X:          np.ndarray,   # (N, 81) float32
+                 X:          np.ndarray,   # (N, 96) float32
                  y_action:   np.ndarray,   # (N,)    int8
                  y_fraction: np.ndarray,   # (N,)    float32, NaN for negatives
                  replay_ids: np.ndarray,   # (N,)    int32
@@ -202,7 +203,7 @@ class TurnDataset(Dataset):
     def __getitem__(self, idx: int):
         idxs = self._turns[idx]
         return (
-            self._X[idxs],            # (E, 81)
+            self._X[idxs],            # (E, 96)
             self._y_action[idxs],     # (E,)
             self._y_fraction[idxs],   # (E,)
             self._has_frac[idxs],     # (E,)
@@ -214,7 +215,7 @@ def collate_turns(batch):
     Pad a list of variable-length turns to the same max edge count E_max.
 
     Returns:
-        X_out    : (B, E_max, 81)   float32
+        X_out    : (B, E_max, 96)   float32
         y_action : (B, E_max)       float32
         y_frac   : (B, E_max)       float32
         has_frac : (B, E_max)       float32
@@ -222,7 +223,7 @@ def collate_turns(batch):
     """
     B     = len(batch)
     E_max = max(t[0].shape[0] for t in batch)
-    F     = batch[0][0].shape[1]   # 81
+    F     = batch[0][0].shape[1]   # 96
 
     X_out    = torch.zeros(B, E_max, F)
     y_act    = torch.zeros(B, E_max)
@@ -501,7 +502,7 @@ def load_model(checkpoint_path: str,
 
 class TransformerCritic(nn.Module):
     """
-    Lightweight transformer critic that reads the same (E, 81) edge features
+    Lightweight transformer critic that reads the same (E, 96) edge features
     as EdgeTransformerNet and produces a scalar V(s) estimate.
 
     Architecture: d_model=64, 2 encoder layers, mean-pool → linear value head.
@@ -514,9 +515,9 @@ class TransformerCritic(nn.Module):
         super().__init__()
         D = self._D
         self.global_proj = nn.Sequential(nn.Linear(31, D), nn.LayerNorm(D), nn.GELU())
-        self.src_proj    = nn.Sequential(nn.Linear(18, D), nn.LayerNorm(D), nn.GELU())
-        self.tgt_proj    = nn.Sequential(nn.Linear(18, D), nn.LayerNorm(D), nn.GELU())
-        self.edge_proj   = nn.Sequential(nn.Linear(14, D), nn.LayerNorm(D), nn.GELU())
+        self.src_proj    = nn.Sequential(nn.Linear(24, D), nn.LayerNorm(D), nn.GELU())
+        self.tgt_proj    = nn.Sequential(nn.Linear(24, D), nn.LayerNorm(D), nn.GELU())
+        self.edge_proj   = nn.Sequential(nn.Linear(17, D), nn.LayerNorm(D), nn.GELU())
         self.fuse        = nn.Sequential(nn.Linear(4 * D, D), nn.LayerNorm(D), nn.GELU())
 
         enc_layer = nn.TransformerEncoderLayer(
@@ -532,14 +533,14 @@ class TransformerCritic(nn.Module):
 
     def forward(self, x: torch.Tensor, pad_mask=None) -> torch.Tensor:
         """
-        x        : (B, E, 81)  or (1, E, 81) for a single turn
+        x        : (B, E, 96)  or (1, E, 96) for a single turn
         pad_mask : (B, E) bool — True = padding, excluded from mean-pool
         Returns  : (B,) scalar values
         """
         g = self.global_proj(x[..., :31])
-        s = self.src_proj(x[..., 31:49])
-        t = self.tgt_proj(x[..., 49:67])
-        e = self.edge_proj(x[..., 67:81])
+        s = self.src_proj(x[..., 31:55])
+        t = self.tgt_proj(x[..., 55:79])
+        e = self.edge_proj(x[..., 79:96])
         h = self.fuse(torch.cat([g, s, t, e], dim=-1))
         h = self.transformer(h, src_key_padding_mask=pad_mask)
 

@@ -155,19 +155,100 @@ def global_features(obs: dict) -> List[float]:
         float(np2),
     ]
 
+# ── fleet arrival table ───────────────────────────────────────────────────
+
+def _fleet_target_planet(fleet, planets_raw):
+    """
+    Ray-sphere intersection: which planet is this fleet heading toward?
+    Fleet format: [id, owner, x, y, angle, from_planet_id, ships]
+    Returns (planet_id, turns_to_arrive) or (None, None).
+    """
+    fx, fy   = float(fleet[2]), float(fleet[3])
+    angle    = float(fleet[4])
+    ships    = max(1, int(fleet[6]))
+    dir_x    = math.cos(angle)
+    dir_y    = math.sin(angle)
+    speed    = _fleet_speed(ships)
+
+    best_id    = None
+    best_turns = float('inf')
+
+    for p in planets_raw:
+        px, py, pr = float(p[2]), float(p[3]), float(p[4])
+        dx = px - fx
+        dy = py - fy
+        proj = dx * dir_x + dy * dir_y
+        if proj <= 0:
+            continue
+        perp_sq = dx*dx + dy*dy - proj*proj
+        if perp_sq >= pr * pr:
+            continue
+        hit_d = max(0.0, proj - math.sqrt(max(0.0, pr*pr - perp_sq)))
+        turns = hit_d / speed
+        if turns < best_turns:
+            best_turns = turns
+            best_id    = p[0]
+
+    return best_id, best_turns
+
+
+def fleet_arrivals_table(fleets_raw, planets_raw, player, total_ships):
+    """
+    Single pass over in-flight fleets → per-planet arrival summary.
+
+    Returns dict: planet_id → {
+        'friendly_ships' : int   (total friendly ships en route here),
+        'enemy_ships'    : int   (total enemy ships en route here),
+        'first_threat'   : float (turns until first enemy arrives, 999=none),
+        'first_friendly' : float (turns until first friendly arrives, 999=none),
+    }
+    """
+    table = {p[0]: {'friendly_ships': 0, 'enemy_ships': 0,
+                    'first_threat': 999.0, 'first_friendly': 999.0}
+             for p in planets_raw}
+
+    for f in (fleets_raw or []):
+        owner = f[1]
+        ships = int(f[6])
+        if ships <= 0:
+            continue
+        target_id, turns = _fleet_target_planet(f, planets_raw)
+        if target_id is None or target_id not in table:
+            continue
+        row = table[target_id]
+        if owner == player:
+            row['friendly_ships'] += ships
+            row['first_friendly'] = min(row['first_friendly'], turns)
+        else:
+            row['enemy_ships'] += ships
+            row['first_threat'] = min(row['first_threat'], turns)
+
+    return table
+
+
 # ── per-planet features (relative to player) ─────────────────────────────
 # These are the features used to represent each planet as a *node*.
 
-N_PLANET_FEATS = 18
+N_PLANET_FEATS = 24   # 18 base + 6 fleet-state features
 
 def planet_features(p, player: int, step: int,
                     total_ships: float, total_prod: float,
                     initial_by_id: dict,
                     my_total_ships: float,
-                    enemy_total_ships: float) -> List[float]:
+                    enemy_total_ships: float,
+                    arrivals: dict = None) -> List[float]:
     """
-    18 features for a single planet, ego-centric w.r.t. `player`.
+    24 features for a single planet, ego-centric w.r.t. `player`.
     p is a raw planet list: [id, owner, x, y, radius, ships, production]
+
+    Features 0-17: base planet features (unchanged)
+    Features 18-23: fleet-state features (new)
+      18. friendly_ships_arriving  — friendly fleets en route here / total_ships
+      19. enemy_ships_arriving     — enemy fleets en route here / total_ships
+      20. net_arrival_balance      — (friendly - enemy) / total_ships, clamp [-1,1]
+      21. turns_to_first_threat    — 0=imminent, 1=no threat ≤100 turns
+      22. already_covered          — 1 if any friendly fleet is heading here
+      23. contested                — 1 if both friendly and enemy fleets en route
     """
     pid, owner, x, y, radius, ships, prod = p[0], p[1], p[2], p[3], p[4], p[5], p[6]
 
@@ -179,8 +260,8 @@ def planet_features(p, player: int, step: int,
     # position: distance from center, quadrant angle normalized
     cx = x - CENTER_X
     cy = y - CENTER_Y
-    dist_center = math.hypot(cx, cy) / 50.0         # [0, ~1.4]
-    angle_norm  = math.atan2(cy, cx) / math.pi      # [-1, 1]
+    dist_center = math.hypot(cx, cy) / 50.0
+    angle_norm  = math.atan2(cy, cx) / math.pi
 
     # orbiting vs static
     r_from_center = math.hypot(cx, cy)
@@ -188,26 +269,18 @@ def planet_features(p, player: int, step: int,
 
     # economic
     ships_norm = min(1.0, ships / max(1.0, total_ships))
-    prod_norm  = prod / 5.0                           # max prod is 5
+    prod_norm  = prod / 5.0
 
     # relative military value
     ships_vs_mine  = min(2.0, ships / max(1.0, my_total_ships))
     ships_vs_enemy = min(2.0, ships / max(1.0, enemy_total_ships))
 
-    # distance from sun
-    dist_sun = max(0.0, r_from_center - SUN_R) / 50.0
-
-    # time-to-produce: how many turns until this planet generates N ships
-    # normalized; useful for deciding whether to capture or wait
+    dist_sun       = max(0.0, r_from_center - SUN_R) / 50.0
     prod_rate_norm = prod / 5.0
+    phase          = step / TOTAL_STEPS
+    econ_share     = min(1.0, (prod / 5.0) / max(1.0, total_prod / 5.0))
 
-    # game phase features
-    phase = step / TOTAL_STEPS
-
-    # remaining ships fraction this planet contributes to total economy
-    econ_share = min(1.0, (prod / 5.0) / max(1.0, total_prod / 5.0))
-
-    return [
+    base = [
         is_mine, is_enemy, is_neutral,
         dist_center, angle_norm,
         is_orbiting,
@@ -217,22 +290,43 @@ def planet_features(p, player: int, step: int,
         prod_rate_norm,
         phase,
         econ_share,
-        min(1.0, radius / 3.5),      # size signal
-        1.0 if ships < 10 else 0.0,  # "weak" flag
-        1.0 if prod >= 4 else 0.0,   # "high value" flag
-        1.0 if ships > 100 else 0.0, # "fortress" flag
+        min(1.0, radius / 3.5),
+        1.0 if ships < 10 else 0.0,
+        1.0 if prod >= 4 else 0.0,
+        1.0 if ships > 100 else 0.0,
     ]
+
+    # ── fleet-state features ──────────────────────────────────────────────
+    arr = (arrivals or {}).get(pid, {'friendly_ships': 0, 'enemy_ships': 0,
+                                      'first_threat': 999.0, 'first_friendly': 999.0})
+    ts = max(1.0, total_ships)
+    friendly_arr      = min(1.0, arr['friendly_ships'] / ts)
+    enemy_arr         = min(1.0, arr['enemy_ships'] / ts)
+    net_balance       = max(-1.0, min(1.0, (arr['friendly_ships'] - arr['enemy_ships']) / ts))
+    turns_to_threat   = min(1.0, arr['first_threat'] / 100.0)
+    already_covered   = 1.0 if arr['friendly_ships'] > 0 else 0.0
+    contested         = 1.0 if arr['friendly_ships'] > 0 and arr['enemy_ships'] > 0 else 0.0
+
+    return base + [friendly_arr, enemy_arr, net_balance,
+                   turns_to_threat, already_covered, contested]
 
 # ── edge features: (source_planet, target_planet) ─────────────────────────
 # These are appended to describe the *relationship* between a pair of planets.
 
-N_EDGE_FEATS = 14
+N_EDGE_FEATS = 17   # 14 base + 3 fleet-state features
 
 def edge_features(src, tgt, player: int, step: int,
-                  total_ships: float) -> List[float]:
+                  total_ships: float,
+                  arrivals: dict = None) -> List[float]:
     """
-    14 features for an (src, tgt) directed edge.
+    17 features for an (src, tgt) directed edge.
     src / tgt are raw planet lists.
+
+    Features 0-13: base edge features (unchanged)
+    Features 14-16: fleet-state features (new)
+      14. src_can_spare      — (src.ships - enemy_arriving_at_src) / total_ships, [-1,1]
+      15. tgt_net_balance    — (friendly - enemy) arriving at tgt / total_ships, [-1,1]
+      16. src_threat_urgent  — 1 if enemy fleet hits src within 5 turns
     """
     sx, sy, sr = src[2], src[3], src[4]
     tx, ty, tr = tgt[2], tgt[3], tgt[4]
@@ -240,44 +334,35 @@ def edge_features(src, tgt, player: int, step: int,
     direct_dist = _dist(sx, sy, tx, ty) / BOARD
     sun_blocked = 1.0 if _path_hits_sun(sx, sy, tx, ty) else 0.0
 
-    # rough ETA with 50% of source ships
     mid_ships = max(1, int(src[5] * 0.5))
     raw_turns = _travel_turns(sx, sy, sr, tx, ty, tr, mid_ships)
-    eta_norm   = min(1.0, (raw_turns or 999) / 100.0)
+    eta_norm  = min(1.0, (raw_turns or 999) / 100.0)
 
-    # angle from source to target
-    angle = math.atan2(ty - sy, tx - sx) / math.pi   # [-1, 1]
+    angle = math.atan2(ty - sy, tx - sx) / math.pi
 
-    # relative strength: how many ships we'd need vs what we have
     tgt_ships = max(0.0, tgt[5])
-    src_ships  = max(0.0, src[5])
+    src_ships = max(0.0, src[5])
     strength_ratio = min(2.0, src_ships / max(1.0, tgt_ships + 1))
+    delta_norm = max(-1.0, min(1.0, (src_ships - tgt_ships) / max(1.0, total_ships)))
 
-    # ship delta normalized
-    delta_norm = (src_ships - tgt_ships) / max(1.0, total_ships)
-    delta_norm = max(-1.0, min(1.0, delta_norm))
-
-    # is this an expansion (neutral), attack (enemy), or reinforce (mine)?
-    tgt_owner   = tgt[1]
-    is_expand   = 1.0 if tgt_owner == -1 else 0.0
-    is_attack   = 1.0 if (tgt_owner != -1 and tgt_owner != player) else 0.0
+    tgt_owner    = tgt[1]
+    is_expand    = 1.0 if tgt_owner == -1 else 0.0
+    is_attack    = 1.0 if (tgt_owner != -1 and tgt_owner != player) else 0.0
     is_reinforce = 1.0 if tgt_owner == player else 0.0
 
-    # production-value of edge (prod * remaining turns) normalized
-    remaining_turns = (TOTAL_STEPS - step)
+    remaining_turns = TOTAL_STEPS - step
     if raw_turns is not None:
         prod_value = (tgt[6] * max(0, remaining_turns - raw_turns)) / (5 * TOTAL_STEPS)
     else:
         prod_value = 0.0
 
-    # orbital complexity: both orbiting = harder to aim
     def _orb(p):
         r = math.hypot(p[2] - CENTER_X, p[3] - CENTER_Y)
         return 1.0 if (r + p[4]) < ROT_LIMIT else 0.0
 
     both_orbiting = _orb(src) * _orb(tgt)
 
-    return [
+    base = [
         direct_dist, sun_blocked, eta_norm,
         angle,
         min(1.0, strength_ratio / 2.0),
@@ -287,21 +372,34 @@ def edge_features(src, tgt, player: int, step: int,
         both_orbiting,
         min(1.0, tgt_ships / max(1.0, total_ships)),
         min(1.0, src_ships / max(1.0, total_ships)),
-        tgt[6] / 5.0,   # target production, normalized
+        tgt[6] / 5.0,
     ]
+
+    # ── fleet-state edge features ─────────────────────────────────────────
+    ts = max(1.0, total_ships)
+    src_arr = (arrivals or {}).get(src[0], {'enemy_ships': 0, 'first_threat': 999.0})
+    tgt_arr = (arrivals or {}).get(tgt[0], {'friendly_ships': 0, 'enemy_ships': 0})
+
+    src_can_spare     = max(-1.0, min(1.0, (src_ships - src_arr['enemy_ships']) / ts))
+    tgt_net_balance   = max(-1.0, min(1.0, (tgt_arr['friendly_ships'] - tgt_arr['enemy_ships']) / ts))
+    src_threat_urgent = 1.0 if src_arr['first_threat'] <= 5 else 0.0
+
+    return base + [src_can_spare, tgt_net_balance, src_threat_urgent]
 
 # ── full sample builder ──────────────────────────────────────────────────────
 
 N_GLOBAL_FEATS   = 31
-N_SRC_FEATS      = N_PLANET_FEATS       # 18
-N_TGT_FEATS      = N_PLANET_FEATS       # 18
-N_EDGE_FEATS_TOT = N_EDGE_FEATS         # 14
-# total per edge: 31 + 18 + 18 + 14 = 81
+N_SRC_FEATS      = N_PLANET_FEATS       # 24
+N_TGT_FEATS      = N_PLANET_FEATS       # 24
+N_EDGE_FEATS_TOT = N_EDGE_FEATS         # 17
+# total per edge: 31 + 24 + 24 + 17 = 96
 N_TOTAL_FEATS    = N_GLOBAL_FEATS + N_SRC_FEATS + N_TGT_FEATS + N_EDGE_FEATS_TOT
 
-def build_edge_sample(obs: dict, src_id: int, tgt_id: int) -> Optional[List[float]]:
+def build_edge_sample(obs: dict, src_id: int, tgt_id: int,
+                      arrivals: dict = None) -> Optional[List[float]]:
     """
-    Build the full feature vector for an (src, tgt) action pair.
+    Build the full 96-dim feature vector for an (src, tgt) action pair.
+    Pass pre-computed arrivals table for efficiency; computes it if None.
     Returns None if either planet is not found in obs.
     """
     player      = obs.get('player', 0)
@@ -325,38 +423,43 @@ def build_edge_sample(obs: dict, src_id: int, tgt_id: int) -> Optional[List[floa
 
     initial_by_id = {p[0]: p for p in (obs.get('initial_planets') or [])}
 
+    if arrivals is None:
+        arrivals = fleet_arrivals_table(fleets_raw, planets_raw, player, total_ships)
+
     gf = global_features(obs)
     sf = planet_features(src, player, step, total_ships, total_prod,
-                         initial_by_id, my_total, enemy_total)
+                         initial_by_id, my_total, enemy_total, arrivals)
     tf = planet_features(tgt, player, step, total_ships, total_prod,
-                         initial_by_id, my_total, enemy_total)
-    ef = edge_features(src, tgt, player, step, total_ships)
+                         initial_by_id, my_total, enemy_total, arrivals)
+    ef = edge_features(src, tgt, player, step, total_ships, arrivals)
 
-    return gf + sf + tf + ef  # length = 81
+    return gf + sf + tf + ef  # length = 96
 
 
 def build_all_candidate_edges(obs: dict) -> List[Tuple[int, int, List[float]]]:
     """
     Returns all (src_id, tgt_id, features) edges that are *physically valid*
     for the current player at this step.
-    src must be owned by the player and have ≥1 ship.
-    tgt must not be owned by the player (attack/expand) OR be owned by the
-    player but have fewer ships than a threatened planet (reinforce).
-    Sun-blocked paths are included (the edge feature flags it) so the
-    network can learn to avoid them; filtering is optional.
+    Fleet arrivals table is computed once and shared across all edges.
     """
     player      = obs.get('player', 0)
     planets_raw = obs.get('planets', []) or []
+    fleets_raw  = obs.get('fleets', []) or []
 
-    my_planets  = [p for p in planets_raw if p[1] == player and p[5] >= 1]
-    all_planets = planets_raw
+    total_ships = sum(max(0, p[5]) for p in planets_raw) + \
+                  sum(max(0, f[6]) for f in fleets_raw) + 1.0
+
+    # compute once per turn — O(F) not O(F×E)
+    arrivals = fleet_arrivals_table(fleets_raw, planets_raw, player, total_ships)
+
+    my_planets = [p for p in planets_raw if p[1] == player and p[5] >= 1]
 
     results = []
     for src in my_planets:
-        for tgt in all_planets:
+        for tgt in planets_raw:
             if tgt[0] == src[0]:
                 continue
-            feats = build_edge_sample(obs, src[0], tgt[0])
+            feats = build_edge_sample(obs, src[0], tgt[0], arrivals)
             if feats is not None:
                 results.append((src[0], tgt[0], feats))
     return results

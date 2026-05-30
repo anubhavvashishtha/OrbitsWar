@@ -380,7 +380,6 @@ def build_submission_ppo_zip(out_path: Path):
     ]
     ppo_candidates = [
         (ROOT / "rl" / "transformer_best.pt", "checkpoints/transformer_best.pt"),
-        (ROOT / "rl" / "transformer_last.pt", "checkpoints/transformer_last.pt"),
     ]
     ppo_found = [(src, arc) for src, arc in ppo_candidates if src.exists()]
 

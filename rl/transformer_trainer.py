@@ -5,26 +5,23 @@ PPO fine-tuning for EdgeTransformerNet (actor) + TransformerCritic (critic).
 
 Unlike self_play_trainer.py (which picks one of 6 abstract intents via a
 small MLP), this trainer lets the EdgeTransformerNet directly score every
-(src, tgt) edge and sample one as the "primary" action for PPO credit
-assignment.  The same model then executes all edges above a threshold for
-the actual game moves.
+(src, tgt) edge using multi-Bernoulli PPO credit assignment.
 
 Actor  : EdgeTransformerNet   (imitation/model.py)
-         Input : (E, 81) edge features for the current turn
-         Output: per-edge logits → Categorical → sample primary edge
+         Input : (E, 96) edge features for the current turn
+         Output: per-edge sigmoid scores → execute top-K above ACTION_THRESHOLD
          Pretrained from: imitation/checkpoints/best_model.pt
 
 Critic : TransformerCritic     (lightweight transformer on edge features)
-         Input : (E, 81) edge feature matrix — same as actor
+         Input : (E, 96) edge feature matrix — same as actor
          Output: scalar V(s)  (no Sigmoid — unbounded for proper GAE)
-         Warm-started from: rl/last.pt OrbitsNet trunk weights (if available)
 
-PPO credit assignment
----------------------
-  Primary edge = the single edge sampled from Categorical(softmax(logits)).
-  This edge's log_prob is used for the PPO clipped ratio.
-  Agent execution = top-K edges above ACTION_THRESHOLD (the actor still
-  moves multiple fleets per turn — PPO just learns via the primary edge).
+PPO credit assignment  (multi-Bernoulli)
+----------------------------------------
+  Every edge that fires above ACTION_THRESHOLD contributes equally to the
+  turn log_prob: mean( log(sigmoid(logit_i)) ) over all executed edges.
+  Edges that do not fire are dropped — no gradient from them.
+  Training and submission execute the SAME set of edges — no mismatch.
 
 Usage
 -----
@@ -34,7 +31,7 @@ Usage
     python rl/transformer_trainer.py --critic rl/last.pt
 """
 
-import sys, glob, os, random, argparse, math
+import sys, glob, os, random, argparse, math, json
 from pathlib import Path
 from collections import defaultdict
 
@@ -60,7 +57,7 @@ from features import build_all_candidate_edges
 # ── imports from RL helpers ───────────────────────────────────────────────
 from self_play_trainer import (
     load_agent, snap, _read,
-    _shaped_reward, _game_stats, _alive_enemies,
+    _event_reward, _game_stats, _alive_enemies,
     ENEMY_DIR, MAIN_PY,
     GAMMA, GAE_LAMBDA,
     CAPTURE_BASE, CAPTURE_FROM_ENEMY, PLANET_LOSS,
@@ -72,6 +69,8 @@ DEFAULT_ACTOR_PATH  = IMITATION_DIR / "checkpoints" / "best_model.pt"
 DEFAULT_CRITIC_PATH = ROOT / "last.pt"      # OrbitsNet checkpoint (for warm-start)
 SAVE_PATH           = ROOT / "transformer_last.pt"
 BEST_PATH           = ROOT / "transformer_best.pt"
+HISTORY_PATH        = ROOT / "transformer_history.json"
+CURVES_PATH         = ROOT / "transformer_curves.png"
 
 # ── hyper-parameters ──────────────────────────────────────────────────────
 N_ROUNDS        = 100_000
@@ -86,9 +85,11 @@ MINI_BATCH      = 64
 ACTION_THRESHOLD = 0.35
 TOP_K_EDGES      = 5
 
-ENT_COEF = 0.005
+ENT_COEF_START = 0.02    # high exploration at start of training
+ENT_COEF_END   = 0.005   # floor after ramp
+ENT_COEF_RAMP  = 50      # rounds to linearly decay from start to end
 
-TARGET_KL       = 0.02
+TARGET_KL       = 0.05
 KL_STOP_MULT    = 1.5
 
 TERMINAL_WIN      = 1.0
@@ -104,17 +105,104 @@ FORCE_1V1 = True   # all training games are 1v1 — faster, cleaner signal, 50% 
 CRITIC_WARMUP_ROUNDS = 20
 
 
+def _ent_coef(rnd: int, start_rnd: int) -> float:
+    """Linear decay from ENT_COEF_START → ENT_COEF_END over ENT_COEF_RAMP rounds."""
+    t = min(1.0, max(0.0, (rnd - start_rnd) / max(1, ENT_COEF_RAMP)))
+    return ENT_COEF_START + (ENT_COEF_END - ENT_COEF_START) * t
+
+
+def _save_curves(history: list, path: Path):
+    """Save a 4-panel training curve PNG from the history list."""
+    if len(history) < 2:
+        return
+    try:
+        import matplotlib
+        matplotlib.use('Agg')   # non-interactive — safe inside training loop
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+
+    rounds   = [h['round']        for h in history]
+    wr       = [h['wr']           for h in history]
+    loss     = [h['loss']         for h in history]
+    ent      = [h['entropy']      for h in history]
+    kl       = [h['kl']           for h in history]
+    clip     = [h['clipfrac']     for h in history]
+    ec       = [h['ent_coef']     for h in history]
+    ev       = [h['events']       for h in history]
+    mom      = [h['momentum']     for h in history]
+    term     = [h['terminal']     for h in history]
+    total    = [h['total_reward'] for h in history]
+
+    fig, axes = plt.subplots(2, 2, figsize=(13, 8))
+    fig.suptitle('PPO Transformer — Training Curves', fontsize=13)
+
+    # ── Panel 1: Win rate ─────────────────────────────────────────────────
+    ax = axes[0, 0]
+    ax.plot(rounds, wr, 'b-', linewidth=1.5, label='win rate')
+    ax.axhline(0.5, color='gray', linestyle='--', linewidth=0.8, label='50 % baseline')
+    # shade critic warmup region
+    warmup_end = history[0]['round'] + CRITIC_WARMUP_ROUNDS
+    ax.axvspan(rounds[0], min(warmup_end, rounds[-1]),
+               alpha=0.08, color='orange', label='critic warmup')
+    ax.set_ylim(0, 1)
+    ax.set_xlabel('Round'); ax.set_ylabel('Win rate')
+    ax.set_title('Win Rate')
+    ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
+
+    # ── Panel 2: PPO loss / entropy / KL ─────────────────────────────────
+    ax  = axes[0, 1]
+    ax2 = ax.twinx()
+    ax.plot(rounds, loss, 'r-',  linewidth=1,   label='PPO loss')
+    ax2.plot(rounds, ent, 'g--', linewidth=1,   label='entropy')
+    ax2.plot(rounds, kl,  'm:',  linewidth=1,   label='KL')
+    ax.set_xlabel('Round'); ax.set_ylabel('PPO loss', color='r')
+    ax2.set_ylabel('Entropy / KL')
+    ax.set_title('Loss / Entropy / KL')
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, fontsize=8); ax.grid(True, alpha=0.3)
+
+    # ── Panel 3: Reward decomposition ────────────────────────────────────
+    ax = axes[1, 0]
+    ax.plot(rounds, ev,   'g-',  linewidth=1,   label='events')
+    ax.plot(rounds, mom,  'b-',  linewidth=1,   label='momentum')
+    ax.plot(rounds, term, 'r-',  linewidth=1,   label='terminal')
+    ax.plot(rounds, total,'k-',  linewidth=2,   label='total')
+    ax.axhline(0, color='gray', linestyle='--', linewidth=0.8, alpha=0.5)
+    ax.set_xlabel('Round'); ax.set_ylabel('Reward (summed over games)')
+    ax.set_title('Reward Decomposition')
+    ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
+
+    # ── Panel 4: ENT_COEF schedule + clip fraction ────────────────────────
+    ax  = axes[1, 1]
+    ax2 = ax.twinx()
+    ax.plot(rounds, ec,   color='purple',  linewidth=1.5, label='ent_coef')
+    ax2.plot(rounds, clip, color='orange', linewidth=1,
+             linestyle='--', label='clipfrac')
+    ax.set_xlabel('Round'); ax.set_ylabel('ent_coef', color='purple')
+    ax2.set_ylabel('clip fraction', color='orange')
+    ax.set_title('Entropy Coef / Clip Fraction')
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, fontsize=8); ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(path, dpi=110, bbox_inches='tight')
+    plt.close(fig)
+
+
 # ════════════════════════════════════════════════════════════════════════════
-# CRITIC  — Transformer on the same (E, 81) edge features as the actor
+# CRITIC  — Transformer on the same (E, 96) edge features as the actor
 # ════════════════════════════════════════════════════════════════════════════
 
 class TransformerCritic(nn.Module):
     """
-    Lightweight transformer critic that consumes the same (E, 81) edge
+    Lightweight transformer critic that consumes the same (E, 96) edge
     feature matrix the actor already builds each turn.
 
     Architecture  (d_model=64, 2 encoder layers):
-      4 component projectors  31/18/18/14 → 64 each
+      4 component projectors  31/24/24/17 → 64 each
       fuse                    256 → 64
       TransformerEncoder      2 × (MHA + FFN)  d=64, heads=4, ffn=256
       mean-pool over edges    → (B, 64)
@@ -128,9 +216,9 @@ class TransformerCritic(nn.Module):
         super().__init__()
         D = self._D
         self.global_proj = nn.Sequential(nn.Linear(31, D), nn.LayerNorm(D), nn.GELU())
-        self.src_proj    = nn.Sequential(nn.Linear(18, D), nn.LayerNorm(D), nn.GELU())
-        self.tgt_proj    = nn.Sequential(nn.Linear(18, D), nn.LayerNorm(D), nn.GELU())
-        self.edge_proj   = nn.Sequential(nn.Linear(14, D), nn.LayerNorm(D), nn.GELU())
+        self.src_proj    = nn.Sequential(nn.Linear(24, D), nn.LayerNorm(D), nn.GELU())
+        self.tgt_proj    = nn.Sequential(nn.Linear(24, D), nn.LayerNorm(D), nn.GELU())
+        self.edge_proj   = nn.Sequential(nn.Linear(17, D), nn.LayerNorm(D), nn.GELU())
         self.fuse        = nn.Sequential(nn.Linear(4 * D, D), nn.LayerNorm(D), nn.GELU())
 
         enc_layer = nn.TransformerEncoderLayer(
@@ -146,14 +234,14 @@ class TransformerCritic(nn.Module):
 
     def forward(self, x: torch.Tensor, pad_mask=None) -> torch.Tensor:
         """
-        x        : (B, E, 81)  or (1, E, 81) for a single turn
+        x        : (B, E, 96)  or (1, E, 96) for a single turn
         pad_mask : (B, E) bool — True = padding, excluded from mean-pool
         Returns  : (B,) scalar values
         """
         g = self.global_proj(x[..., :31])
-        s = self.src_proj(x[..., 31:49])
-        t = self.tgt_proj(x[..., 49:67])
-        e = self.edge_proj(x[..., 67:81])
+        s = self.src_proj(x[..., 31:55])
+        t = self.tgt_proj(x[..., 55:79])
+        e = self.edge_proj(x[..., 79:96])
         h = self.fuse(torch.cat([g, s, t, e], dim=-1))          # (B, E, D)
         h = self.transformer(h, src_key_padding_mask=pad_mask)   # (B, E, D)
 
@@ -174,15 +262,15 @@ class TransformerRolloutBuffer:
     """
     Rollout buffer for EdgeTransformerNet-based PPO.
 
-    Each transition stores the FULL turn edge-feature matrix (E, 81)
+    Each transition stores the FULL turn edge-feature matrix (E, 96)
     so the actor can be re-run with gradients during the PPO update.
     This is memory-heavier than storing a single 30-dim state vector,
     but it allows the transformer to re-score with the updated weights.
 
     Action semantics
     ----------------
-    chosen_idx : index into the edge_list of the primary sampled edge.
-    log_prob   : log π(chosen_idx | turn_feats) at collection time.
+    executed_idxs : indices of edges that fired this turn (1–TOP_K_EDGES).
+    log_prob      : mean log(sigmoid(logit_i)) over executed edges at collection time.
     """
 
     def __init__(self, gamma: float = GAMMA, lam: float = GAE_LAMBDA):
@@ -191,19 +279,21 @@ class TransformerRolloutBuffer:
         self.clear()
 
     def clear(self):
-        self.turn_feats  = []   # (E_i, 81) numpy arrays — shared by actor & critic
-        self.chosen_idxs = []   # int
-        self.log_probs   = []   # float
-        self.rewards     = []   # float
-        self.dones       = []   # float  0/1
-        self.values      = []   # float  V(s)
-        self.total_shaped = 0.0
+        self.turn_feats    = []   # (E_i, 96) numpy arrays — shared by actor & critic
+        self.executed_idxs = []   # list[int] — indices of edges that fired this turn
+        self.log_probs     = []   # float — mean logsigmoid over executed edges
+        self.rewards       = []   # float
+        self.dones         = []   # float  0/1
+        self.values        = []   # float  V(s)
+        self.total_shaped   = 0.0
+        self.total_events   = 0.0   # planet captures / losses / eliminations
+        self.total_momentum = 0.0   # continuous share-delta term
         self.terminal_bonus = 0.0
 
-    def add(self, turn_feats: np.ndarray, chosen_idx: int,
+    def add(self, turn_feats: np.ndarray, executed_idxs: list,
             log_prob: float, reward: float, done: bool, value: float):
         self.turn_feats.append(turn_feats.astype(np.float32))
-        self.chosen_idxs.append(int(chosen_idx))
+        self.executed_idxs.append(list(executed_idxs))
         self.log_probs.append(float(log_prob))
         self.rewards.append(float(reward))
         self.dones.append(float(done))
@@ -235,37 +325,37 @@ class TransformerRolloutBuffer:
 def _build_moves(obs: dict, actor: EdgeTransformerNet, device: str):
     """
     Score all candidate edges with the actor.  Return:
-      turn_feats  : (E, 81) numpy
-      chosen_idx  : int   (primary sampled edge — used for PPO log_prob)
-      log_prob    : float
-      moves       : list of [src, angle, ships] — top-K edges above threshold,
-                    same execution as submission (train matches inference)
-    Returns (None, None, None, []) if no candidates.
+      feat_matrix    : (E, 96) numpy
+      executed_idxs  : list[int] — indices of edges that fired (1–TOP_K_EDGES)
+      log_prob       : float — mean log(sigmoid(logit)) over executed edges
+      moves          : list of [src, angle, ships]
+    Returns (feat_matrix, [], None, []) if no edges fire above threshold.
+    Returns (None, [], None, []) if no candidates at all.
+
+    Multi-Bernoulli credit: every edge that fires contributes equally to the
+    log_prob used for the PPO ratio.  Edges that do not fire are dropped —
+    they produce no gradient signal.
     """
     from main import build_world
 
     candidates = build_all_candidate_edges(obs)
     if not candidates:
-        return None, None, None, []
+        return None, [], None, []
 
     edge_list   = [(src, tgt) for src, tgt, _ in candidates]
     feat_matrix = np.array([f for _, _, f in candidates], dtype=np.float32)
 
-    X = torch.from_numpy(feat_matrix).unsqueeze(0).to(device)  # (1, E, 81)
+    X = torch.from_numpy(feat_matrix).unsqueeze(0).to(device)  # (1, E, 96)
 
     with torch.no_grad():
         actor.eval()
-        al, fl = actor(X, pad_mask=None)
-        logits   = al.squeeze(0).squeeze(-1)                    # (E,)
-        act_prob = torch.sigmoid(logits).cpu().numpy()          # (E,)
+        al, fl   = actor(X, pad_mask=None)
+        logits   = al.squeeze(0).squeeze(-1)                     # (E,)
+        act_prob = torch.sigmoid(logits).cpu().numpy()           # (E,)
         fraction = torch.sigmoid(fl.squeeze(0).squeeze(-1)).cpu().numpy()
 
-        dist       = torch.distributions.Categorical(logits=logits)
-        chosen_t   = dist.sample()
-        chosen_idx = int(chosen_t.item())
-        log_prob   = float(dist.log_prob(chosen_t).item())
-
-    # Execute top-K edges above threshold — identical to submission agent
+    # Execute top-K edges strictly above threshold — same as submission agent
+    executed_indices = []
     try:
         world      = build_world(obs)
         planet_map = {p.id: p for p in world.planets}
@@ -277,8 +367,8 @@ def _build_moves(obs: dict, actor: EdgeTransformerNet, device: str):
         for i in order:
             if committed >= TOP_K_EDGES:
                 break
-            if act_prob[i] < ACTION_THRESHOLD and i != chosen_idx:
-                continue
+            if act_prob[i] < ACTION_THRESHOLD:
+                break   # list is sorted descending — nothing below this is worth taking
             src_id, tgt_id = edge_list[i]
             src = planet_map.get(src_id)
             tgt = planet_map.get(tgt_id)
@@ -293,11 +383,21 @@ def _build_moves(obs: dict, actor: EdgeTransformerNet, device: str):
                 continue
             spent[src_id] += send
             moves.append([src_id, float(shot[0]), send])
+            executed_indices.append(i)
             committed += 1
     except Exception:
-        moves = []
+        moves            = []
+        executed_indices = []
 
-    return feat_matrix, chosen_idx, log_prob, moves
+    if not executed_indices:
+        return feat_matrix, [], None, moves
+
+    # Multi-Bernoulli log_prob: mean over executed edges so scale is
+    # consistent whether 1 or 5 edges fire this turn.
+    exec_t   = torch.tensor(executed_indices, dtype=torch.long)
+    log_prob = float(F.logsigmoid(logits[exec_t]).mean().item())
+
+    return feat_matrix, executed_indices, log_prob, moves
 
 
 def play_game_collect(actor: EdgeTransformerNet,
@@ -335,7 +435,7 @@ def play_game_collect(actor: EdgeTransformerNet,
         # ── Player 0: actor decides moves ─────────────────────────────────
         p0_moves   = []
         store_this = False
-        turn_feats = chosen_idx = log_prob_val = value_val = None
+        turn_feats = exec_idxs = log_prob_val = value_val = None
         shaped_r = 0.0
 
         if obss[0] is not None:
@@ -347,19 +447,33 @@ def play_game_collect(actor: EdgeTransformerNet,
             if sd:
                 curr_stats = _game_stats(sd, 0)
                 curr_alive = _alive_enemies(sd, rf, 0)
-                shaped_r   = _shaped_reward(
-                    curr_stats, prev_stats, prev_sd, sd,
-                    prev_alive, curr_alive, player=0)
+
+                if prev_stats is not None and prev_sd is not None:
+                    event_r    = _event_reward(prev_sd, sd, prev_alive, curr_alive, player=0)
+                    my_s, my_pr, my_pl, tot_s, tot_pr, _ = curr_stats
+                    ps,   ppr,   ppl,   _,     _,      _ = prev_stats
+                    momentum_r = MOMENTUM_SCALE * (
+                        0.4 * (my_s  - ps)  / max(1.0, tot_s)
+                        + 0.4 * (my_pr - ppr) / max(1.0, tot_pr)
+                        + 0.2 * (my_pl - ppl) / max(1.0, tot_pl)
+                    )
+                else:
+                    event_r = momentum_r = 0.0
+
+                shaped_r = event_r + momentum_r
+                buf.total_events   += event_r
+                buf.total_momentum += momentum_r
+
                 prev_stats = curr_stats
                 prev_sd    = sd
                 prev_alive = curr_alive
 
-                # Actor: score edges, sample primary, build moves
-                turn_feats, chosen_idx, log_prob_val, p0_moves = \
+                # Actor: score edges, execute top-K above threshold, build moves
+                turn_feats, exec_idxs, log_prob_val, p0_moves = \
                     _build_moves(obss[0], actor, device)
 
-                # Critic: estimate V(s) from same edge features
-                if turn_feats is not None:
+                # Only store turns where at least one edge actually fired
+                if turn_feats is not None and exec_idxs and log_prob_val is not None:
                     with torch.no_grad():
                         critic.eval()
                         tf_t      = torch.from_numpy(turn_feats).unsqueeze(0).to(device)
@@ -370,7 +484,7 @@ def play_game_collect(actor: EdgeTransformerNet,
 
         # ── Store transition (shaped reward from this step) ────────────────
         if store_this:
-            buf.add(turn_feats, chosen_idx, log_prob_val,
+            buf.add(turn_feats, exec_idxs, log_prob_val,
                     shaped_r, False, value_val)
 
         # ── Execute all agents ─────────────────────────────────────────────
@@ -395,9 +509,9 @@ def play_game_collect(actor: EdgeTransformerNet,
             term = TERMINAL_DRAW
         else:
             term = TERMINAL_LOSS
-        buf.terminal_bonus = term
-        buf.rewards[-1] += term
-        buf.dones[-1] = True
+        buf.terminal_bonus  = term
+        buf.rewards[-1]     = term   # override — game is over, shaped signal is noise
+        buf.dones[-1]       = True
 
     outcome = "WIN" if winner == 0 else ("DRAW" if winner < 0 else "LOSS")
     return buf, outcome
@@ -412,9 +526,10 @@ def ppo_update(actor: EdgeTransformerNet,
                optimizer: optim.Optimizer,
                bufs: list,
                device: str,
-               freeze_actor: bool = False):
+               freeze_actor: bool = False,
+               ent_coef: float = ENT_COEF_END):
     """
-    PPO update with fixed entropy coefficient (ENT_COEF).
+    PPO update with scheduled entropy coefficient (ent_coef).
 
     freeze_actor=True: only the critic is updated (warm-up phase).
       The actor forward still runs (for log-probs), but its gradients
@@ -424,18 +539,18 @@ def ppo_update(actor: EdgeTransformerNet,
     if not bufs:
         return _empty
 
-    all_tf, all_ci, all_oldp, all_oldv = [], [], [], []
+    all_tf, all_exec, all_oldp, all_oldv = [], [], [], []
     all_ret, all_adv = [], []
 
     for buf in bufs:
         if len(buf) < 2:
             continue
         rets, advs = buf.compute_gae(last_value=0.0)
-        for tf, ci, op, ov, ret, adv in zip(
-                buf.turn_feats, buf.chosen_idxs, buf.log_probs, buf.values,
+        for tf, ei, op, ov, ret, adv in zip(
+                buf.turn_feats, buf.executed_idxs, buf.log_probs, buf.values,
                 rets, advs):
             all_tf.append(tf)
-            all_ci.append(ci)
+            all_exec.append(ei)
             all_oldp.append(op)
             all_oldv.append(ov)
             all_ret.append(ret)
@@ -446,6 +561,7 @@ def ppo_update(actor: EdgeTransformerNet,
 
     N = len(all_tf)
     old_lp = torch.FloatTensor(all_oldp).to(device)
+
     old_v = torch.FloatTensor(all_oldv).to(device)
     returns = torch.FloatTensor(all_ret).to(device)
     adv_all = torch.FloatTensor(all_adv).to(device)
@@ -469,11 +585,18 @@ def ppo_update(actor: EdgeTransformerNet,
             for b in batch:
                 tf = torch.from_numpy(all_tf[b]).unsqueeze(0).to(device)
                 al, _ = actor(tf, pad_mask=None)
-                logits = al.squeeze(0).squeeze(-1)
-                dist = torch.distributions.Categorical(logits=logits)
-                ci = torch.tensor(all_ci[b], device=device)
-                new_log_ps.append(dist.log_prob(ci))
-                entropies.append(dist.entropy())
+                logits = al.squeeze(0).squeeze(-1)   # (E,)
+
+                # Multi-Bernoulli: mean log(sigmoid(logit)) over edges that fired
+                exec_idxs = torch.tensor(all_exec[b], dtype=torch.long, device=device)
+                new_log_ps.append(F.logsigmoid(logits[exec_idxs]).mean())
+
+                # Bernoulli entropy over ALL candidate edges — reflects full policy uncertainty
+                probs = torch.sigmoid(logits)
+                ent   = -(probs * (probs + 1e-8).log()
+                          + (1 - probs) * (1 - probs + 1e-8).log()).mean()
+                entropies.append(ent)
+
                 values_list.append(critic(tf).squeeze(0))
 
             new_lp = torch.stack(new_log_ps)
@@ -497,7 +620,7 @@ def ppo_update(actor: EdgeTransformerNet,
                     ratio * adv_b,
                     torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * adv_b,
                 ).mean()
-                loss = -L_clip + VAL_COEF * L_val - ENT_COEF * entropy
+                loss = -L_clip + VAL_COEF * L_val - ent_coef * entropy
 
             with torch.no_grad():
                 approx_kl = ((ratio - 1) - torch.log(ratio.clamp(min=1e-8))).mean()
@@ -592,6 +715,15 @@ def train(n_rounds:        int  = N_ROUNDS,
         print(f"  Critic: TransformerCritic — starts fresh.")
         print(f"  Actor will be frozen for first {CRITIC_WARMUP_ROUNDS} rounds (critic warm-up).")
 
+    # ── Load training history (keep rounds before start_rnd on resume) ─────
+    history = []
+    if HISTORY_PATH.exists():
+        try:
+            history = json.loads(HISTORY_PATH.read_text())
+            history = [h for h in history if h.get('round', 0) < start_rnd]
+        except Exception:
+            history = []
+
     # ── Optimizers ─────────────────────────────────────────────────────────
     optimizer = optim.AdamW([
         {"params": actor.parameters(),  "lr": LR_ACTOR},
@@ -622,7 +754,7 @@ def train(n_rounds:        int  = N_ROUNDS,
     print(f"Critic params: {n_critic:,}")
     print(f"\nPPO (EdgeTransformer): {n_rounds} rounds x {games_per_round} games")
     print(f"  LR actor={LR_ACTOR}  LR critic={LR_CRITIC}")
-    print(f"  ENT_COEF={ENT_COEF} (fixed)  CLIP_EPS={CLIP_EPS}")
+    print(f"  ENT_COEF {ENT_COEF_START:.3f}→{ENT_COEF_END:.3f} over {ENT_COEF_RAMP} rounds  CLIP_EPS={CLIP_EPS}")
     print(f"  Critic warm-up: first {CRITIC_WARMUP_ROUNDS} rounds actor is frozen")
     print(f"  FORCE_1V1={FORCE_1V1}  Terminal win/loss={TERMINAL_WIN}/{TERMINAL_LOSS}")
     print("=" * 60)
@@ -671,11 +803,13 @@ def train(n_rounds:        int  = N_ROUNDS,
         # ── PPO update on all games from this round ────────────────────────
         # Warm-up only on a fresh start (no prior checkpoint).
         # When resuming, the critic is already calibrated — skip immediately.
-        freeze_actor = is_fresh_start and ((rnd - 1) < CRITIC_WARMUP_ROUNDS)
+        freeze_actor  = is_fresh_start and ((rnd - 1) < CRITIC_WARMUP_ROUNDS)
+        ent_coef_val  = _ent_coef(rnd, start_rnd)
         stats = ppo_update(
             actor, critic, optimizer,
             all_bufs, device,
-            freeze_actor=freeze_actor)
+            freeze_actor=freeze_actor,
+            ent_coef=ent_coef_val)
         if isinstance(stats, dict):
             avg_loss = stats["loss"]
             avg_ent = stats["entropy"]
@@ -686,8 +820,35 @@ def train(n_rounds:        int  = N_ROUNDS,
             stats = {"clipfrac": 0.0}
         wr = wins / max(1, games_per_round)
         tag = ""
-        shaped_sum = sum(getattr(b, "total_shaped", 0.0) for b in all_bufs)
+        event_sum  = sum(getattr(b, "total_events",   0.0) for b in all_bufs)
+        mom_sum    = sum(getattr(b, "total_momentum", 0.0) for b in all_bufs)
         term_sum   = sum(getattr(b, "terminal_bonus", 0.0) for b in all_bufs)
+        shaped_sum = event_sum + mom_sum
+        clipfrac   = stats.get('clipfrac', 0.0)
+
+        # ── Record history and save curves ────────────────────────────────
+        history.append({
+            'round':        rnd,
+            'wr':           wr,
+            'wins':         wins,
+            'losses':       losses,
+            'draws':        draws,
+            'loss':         avg_loss,
+            'entropy':      avg_ent,
+            'kl':           avg_kl,
+            'clipfrac':     clipfrac,
+            'ent_coef':     ent_coef_val,
+            'events':       event_sum,
+            'momentum':     mom_sum,
+            'terminal':     term_sum,
+            'total_reward': shaped_sum + term_sum,
+            'freeze_actor': freeze_actor,
+        })
+        try:
+            HISTORY_PATH.write_text(json.dumps(history, indent=2))
+            _save_curves(history, CURVES_PATH)
+        except Exception as _e:
+            print(f"  [warn] could not save history/curves: {_e}")
 
         for buf in all_bufs:
             buf.clear()
@@ -720,8 +881,10 @@ def train(n_rounds:        int  = N_ROUNDS,
 
         warmup_str = "  [critic warmup — actor frozen]" if freeze_actor else ""
         print(f"\n  -> WR={wr:.1%}  loss={avg_loss:.4f}  ent={avg_ent:.4f}  "
-              f"kl={avg_kl:.4f}  clip={stats.get('clipfrac', 0.0):.3f}  "
-              f"shaped={shaped_sum:.1f}  terminal={term_sum:.1f}{warmup_str}{tag}")
+              f"kl={avg_kl:.4f}  clip={clipfrac:.3f}  ent_coef={ent_coef_val:.4f}"
+              f"\n     reward:  events={event_sum:+.2f}  momentum={mom_sum:+.2f}  "
+              f"terminal={term_sum:+.2f}  total={shaped_sum + term_sum:+.2f}"
+              f"{warmup_str}{tag}")
 
     print(f"\nDone. Best PPO WR={best_wr_ppo:.1%}")
     return actor, critic
