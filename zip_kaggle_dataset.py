@@ -220,6 +220,10 @@ def build_imitation_zip(out_path: Path):
         hist = ROOT / "imitation" / "checkpoints" / "training_history.json"
         if hist.exists():
             _add_file(zf, hist, "training_history.json", stats)
+        # Include log for accumulation across sessions
+        log = ROOT / "imitation" / "checkpoints" / "imitation_training.log"
+        if log.exists():
+            _add_file(zf, log, "imitation_training.log", stats)
 
     mb = out_path.stat().st_size / 1e6
     print(f"\n  Done: {stats['files']} files  ->  {mb:.1f} MB")
@@ -246,8 +250,10 @@ def build_rl_zip(out_path: Path):
     print(f"{'='*60}")
 
     candidates = [
-        (ROOT / "rl" / "transformer_last.pt", "transformer_last.pt"),
-        (ROOT / "rl" / "transformer_best.pt", "transformer_best.pt"),
+        (ROOT / "rl" / "transformer_last.pt",      "transformer_last.pt"),
+        (ROOT / "rl" / "transformer_best.pt",      "transformer_best.pt"),
+        (ROOT / "rl" / "transformer_history.json", "transformer_history.json"),
+        (ROOT / "rl" / "ppo_training.log",         "ppo_training.log"),
     ]
     found = [(src, arc) for src, arc in candidates if src.exists()]
 
@@ -300,6 +306,39 @@ def build_dataset_zip(out_path: Path):
 # ══════════════════════════════════════════════════════════════════════════════
 # ZIP 5 — submission_imitation   (Kaggle competition submission)
 # ══════════════════════════════════════════════════════════════════════════════
+
+def build_enemies_zip(out_path: Path):
+    """
+    Zips the full enemy agents/ directory including weights.
+    Unlike orbitswar-src (which skips weights/ and .pt files),
+    this zip includes everything so RL agents work correctly on Kaggle.
+    Only __pycache__ and .pyc files are excluded.
+    """
+    stats = {"files": 0, "bytes": 0}
+    print(f"\n{'='*60}")
+    print(f"  Building {out_path.name}")
+    print(f"{'='*60}")
+
+    ea = ROOT / "enemy agents"
+    if not ea.exists():
+        print("  [SKIP] 'enemy agents/' not found.")
+        return None
+
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, dirs, files in os.walk(ea):
+            dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+            for fname in sorted(files):
+                fpath = Path(root) / fname
+                if fpath.suffix == ".pyc":
+                    continue
+                rel  = fpath.relative_to(ea)
+                arc  = f"enemy agents/{rel}".replace("\\", "/")
+                _add_file(zf, fpath, arc, stats)
+
+    mb = out_path.stat().st_size / 1e6
+    print(f"\n  Done: {stats['files']} files  ->  {mb:.1f} MB")
+    return stats
+
 
 def build_submission_zip(out_path: Path):
     """
@@ -435,16 +474,18 @@ Workflow
     parser.add_argument("--src",        action="store_true", help="Source code + notebooks")
     parser.add_argument("--dataset",    action="store_true", help="dataset.npz (after extraction)")
     parser.add_argument("--models",     action="store_true", help="Model checkpoints (after training)")
+    parser.add_argument("--enemies",    action="store_true", help="Enemy agents (incl. weights) for tournament")
     parser.add_argument("--submission", action="store_true", help="Imitation-only competition zip")
     parser.add_argument("--submission-ppo", action="store_true", help="PPO competition zip")
     parser.add_argument("--all",        action="store_true", help="Build everything available")
     args = parser.parse_args()
 
     # default: build everything if no flag given
-    build_all    = args.all or not (args.src or args.dataset or args.models or args.submission or args.submission_ppo)
+    build_all    = args.all or not (args.src or args.dataset or args.models or args.enemies or args.submission or args.submission_ppo)
     do_src        = args.src        or build_all
     do_dataset    = args.dataset    or build_all
     do_models     = args.models     or build_all
+    do_enemies    = args.enemies    or build_all
     do_submission = args.submission or build_all
     do_submission_ppo = args.submission_ppo or build_all
 
@@ -474,6 +515,12 @@ Workflow
         r = build_rl_zip(p)
         if r:
             built.append(("orbitswar-rl",         p, "optional — critic warm-start"))
+
+    if do_enemies:
+        p = OUT_DIR / "orbitswar-enemies.zip"
+        r = build_enemies_zip(p)
+        if r:
+            built.append(("orbitswar-enemies", p, "required for tournament notebook"))
 
     if do_submission:
         p = OUT_DIR / "submission_imitation.zip"
