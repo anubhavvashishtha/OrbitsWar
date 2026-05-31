@@ -92,8 +92,8 @@ ENT_COEF_RAMP  = 50
 TARGET_KL       = 0.02    # stop early if policy diverges — prevents collapse
 KL_STOP_MULT    = 1.5
 
-TERMINAL_WIN      = 2.0   # reward wins moderately
-TERMINAL_LOSS     = -3.0  # punish losses harder — break-even at 60% WR
+TERMINAL_WIN      = 1.0
+TERMINAL_LOSS     = -1.0
 TERMINAL_DRAW     = 0.0
 
 FORCE_1V1 = True
@@ -121,11 +121,84 @@ CURRICULUM_TIERS = [
 
 START_TIER = 0   # ← CHANGE THIS each session (0, 1, or 2)
 
+# ── Self-play ───────────────────────────────────────────────────────────────
+# Disabled by default — enable for local 24h runs after curriculum is complete.
+# Every SELFPLAY_SNAPSHOT_EVERY rounds, a frozen copy of the current actor is
+# added to the enemy pool.  The agent trains against its own improving past self
+# → no fixed-pool ceiling, keeps learning indefinitely.
+SELFPLAY_ENABLED        = False  # ← set True for local 24h runs
+SELFPLAY_SNAPSHOT_EVERY = 15    # save a snapshot every N rounds
+SELFPLAY_MAX_SNAPSHOTS  = 10    # keep only the N most recent in pool
+
+# ── 4v4 placement rewards ───────────────────────────────────────────────────
+# Hardcoded independently of 1v1 terminal values.
+# 2nd place is treated as a partial win (decent in 4-player FFA).
+# 3rd/4th scale the penalty by how badly the agent finished.
+PLACEMENT_REWARD = {
+    1:  1.0,   # 1st — same signal as a 1v1 win
+    2:  0.3,   # 2nd — small positive, not punished
+    3: -0.5,   # 3rd — moderate negative
+    4: -1.0,   # 4th — same signal as a 1v1 loss
+}
+
 
 def _ent_coef(rnd: int, start_rnd: int) -> float:
     """Linear decay from ENT_COEF_START → ENT_COEF_END over ENT_COEF_RAMP rounds."""
     t = min(1.0, max(0.0, (rnd - start_rnd) / max(1, ENT_COEF_RAMP)))
     return ENT_COEF_START + (ENT_COEF_END - ENT_COEF_START) * t
+
+
+def create_snapshot_agent(actor: EdgeTransformerNet, device: str):
+    """
+    Freeze a copy of the current actor and return it as an enemy agent function.
+    The returned callable takes an obs dict and returns a list of moves —
+    same interface as any enemy in play_game_collect.
+    """
+    import copy
+    snapshot = EdgeTransformerNet().to(device)
+    snapshot.load_state_dict(copy.deepcopy(actor.state_dict()))
+    snapshot.eval()
+
+    def agent_fn(obs):
+        try:
+            from main import build_world
+            candidates = build_all_candidate_edges(obs)
+            if not candidates:
+                return []
+            edge_list   = [(src, tgt) for src, tgt, _ in candidates]
+            feat_matrix = np.array([f for _, _, f in candidates], dtype=np.float32)
+            X = torch.from_numpy(feat_matrix).unsqueeze(0).to(device)
+            with torch.no_grad():
+                al, fl   = snapshot(X, pad_mask=None)
+                act_prob = torch.sigmoid(al.squeeze(0).squeeze(-1)).cpu().numpy()
+                fraction = torch.sigmoid(fl.squeeze(0).squeeze(-1)).cpu().numpy()
+            world      = build_world(obs)
+            planet_map = {p.id: p for p in world.planets}
+            spent: dict = {}
+            moves = []
+            committed = 0
+            for i in sorted(range(len(edge_list)), key=lambda i: -act_prob[i]):
+                if committed >= TOP_K_EDGES or act_prob[i] < ACTION_THRESHOLD:
+                    break
+                src_id, tgt_id = edge_list[i]
+                src = planet_map.get(src_id)
+                if src is None or src.owner != world.player:
+                    continue
+                available = int(src.ships) - spent.get(src_id, 0)
+                if available <= 0 or fraction[i] < 0.08:
+                    continue
+                send = max(1, int(available * min(0.90, float(fraction[i]))))
+                shot = world.plan_shot(src_id, tgt_id, send)
+                if shot is None:
+                    continue
+                spent[src_id] = spent.get(src_id, 0) + send
+                moves.append([src_id, float(shot[0]), send])
+                committed += 1
+            return moves
+        except Exception:
+            return []
+
+    return agent_fn
 
 
 def _save_curves(history: list, path: Path):
@@ -514,23 +587,40 @@ def play_game_collect(actor: EdgeTransformerNet,
         states = env.step(actions)
         step  += 1
 
-    # ── Terminal win/loss override ─────────────────────────────────────────
+    # ── Terminal reward override ───────────────────────────────────────────
     rewards = [float(_read(s, "reward", 0) or 0) for s in states]
     max_r   = max(rewards)
     winner  = -1 if max_r <= 0 else rewards.index(max_r)
 
     if buf.rewards:
-        if winner == 0:
-            term = TERMINAL_WIN
-        elif winner < 0:
-            term = TERMINAL_DRAW
+        if n == 2:
+            # 1v1: simple win/loss/draw
+            if winner == 0:
+                term = TERMINAL_WIN
+            elif winner < 0:
+                term = TERMINAL_DRAW
+            else:
+                term = TERMINAL_LOSS
+            outcome = "WIN" if winner == 0 else ("DRAW" if winner < 0 else "LOSS")
         else:
-            term = TERMINAL_LOSS
-        buf.terminal_bonus  = term
-        buf.rewards[-1]     = term   # override — game is over, shaped signal is noise
-        buf.dones[-1]       = True
+            # 4v4: placement-based reward (2nd ≠ 4th)
+            if max_r <= 0:
+                term    = TERMINAL_DRAW
+                outcome = "DRAW"
+            else:
+                sorted_players = sorted(range(len(rewards)), key=lambda i: -rewards[i])
+                our_placement  = sorted_players.index(0) + 1   # 1-indexed rank
+                term    = PLACEMENT_REWARD.get(our_placement, TERMINAL_LOSS)
+                outcome = ("WIN" if our_placement == 1
+                           else "DRAW" if our_placement == 2
+                           else "LOSS")
 
-    outcome = "WIN" if winner == 0 else ("DRAW" if winner < 0 else "LOSS")
+        buf.terminal_bonus = term
+        buf.rewards[-1]    = term   # override last step — game over
+        buf.dones[-1]      = True
+    else:
+        outcome = "DRAW"
+
     return buf, outcome
 
 
@@ -813,11 +903,13 @@ def train(n_rounds:        int  = N_ROUNDS,
                 filler   = random.choice(active_enemies)
                 fns      = [None, filler[1]]
                 mode_tag = "1v1"
-            elif g % 3 == 0:
+            elif g % 2 == 0:
+                # 50/50 split: even games → 1v1, odd → 4v4
                 filler   = random.choice(active_enemies)
                 fns      = [None, filler[1]]
                 mode_tag = "1v1"
             else:
+                # 4v4: 3 opponents — mix of curriculum bots and self-play snapshots
                 fillers  = random.choices(active_enemies, k=min(3, len(active_enemies)))
                 fns      = [None] + [fn for _, fn in fillers]
                 mode_tag = "4p"
@@ -907,6 +999,21 @@ def train(n_rounds:        int  = N_ROUNDS,
             "critic": critic.state_dict(),
         }
         torch.save(ckpt, SAVE_PATH)
+
+        # ── Self-play snapshot ────────────────────────────────────────────────
+        if SELFPLAY_ENABLED and rnd % SELFPLAY_SNAPSHOT_EVERY == 0:
+            snap_fn    = create_snapshot_agent(actor, device)
+            snap_label = f'self_r{rnd}'
+            active_enemies.append((snap_label, snap_fn))
+            # Drop oldest if over limit
+            self_snaps = [(l, f) for l, f in active_enemies if l.startswith('self_')]
+            if len(self_snaps) > SELFPLAY_MAX_SNAPSHOTS:
+                oldest = self_snaps[0][0]
+                active_enemies = [(l, f) for l, f in active_enemies if l != oldest]
+                print(f"\n  Self-play: dropped {oldest}, kept {SELFPLAY_MAX_SNAPSHOTS} snapshots")
+            n_snaps = len([l for l, _ in active_enemies if l.startswith('self_')])
+            print(f"\n  Self-play snapshot saved: {snap_label}  "
+                  f"({n_snaps} snapshots in pool, total pool={len(active_enemies)})")
 
         if not freeze_actor and wr > best_wr_ppo:
             best_wr_ppo = wr
