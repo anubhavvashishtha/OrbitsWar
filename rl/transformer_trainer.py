@@ -450,7 +450,7 @@ def play_game_collect(actor: EdgeTransformerNet,
 
                 if prev_stats is not None and prev_sd is not None:
                     event_r    = _event_reward(prev_sd, sd, prev_alive, curr_alive, player=0)
-                    my_s, my_pr, my_pl, tot_s, tot_pr, _ = curr_stats
+                    my_s, my_pr, my_pl, tot_s, tot_pr, tot_pl = curr_stats
                     ps,   ppr,   ppl,   _,     _,      _ = prev_stats
                     momentum_r = MOMENTUM_SCALE * (
                         0.4 * (my_s  - ps)  / max(1.0, tot_s)
