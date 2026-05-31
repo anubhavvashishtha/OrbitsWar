@@ -73,36 +73,53 @@ HISTORY_PATH        = ROOT / "transformer_history.json"
 CURVES_PATH         = ROOT / "transformer_curves.png"
 
 # ── hyper-parameters ──────────────────────────────────────────────────────
-N_ROUNDS        = 100_000
+N_ROUNDS        = 30      # ← set to 30 for test run, increase after checking results
 GAMES_PER_ROUND = 16
-LR_ACTOR        = 5e-5    # low — actor is pretrained; fine-tune carefully
-LR_CRITIC       = 2e-4
-CLIP_EPS        = 0.2
+LR_ACTOR        = 1e-5    # tighter than before — prevents policy collapse
+LR_CRITIC       = 1e-4
+CLIP_EPS        = 0.1     # tighter clipping — less aggressive policy change
 VAL_COEF        = 0.5
-VALUE_CLIP      = 0.2
-PPO_EPOCHS      = 4
+VALUE_CLIP      = 0.1
+PPO_EPOCHS      = 2       # fewer updates per batch — reduces overfitting to a round
 MINI_BATCH      = 64
 ACTION_THRESHOLD = 0.35
 TOP_K_EDGES      = 5
 
-ENT_COEF_START = 0.02    # high exploration at start of training
-ENT_COEF_END   = 0.005   # floor after ramp
-ENT_COEF_RAMP  = 50      # rounds to linearly decay from start to end
+ENT_COEF_START = 0.01
+ENT_COEF_END   = 0.002
+ENT_COEF_RAMP  = 50
 
-TARGET_KL       = 0.05
+TARGET_KL       = 0.02    # stop early if policy diverges — prevents collapse
 KL_STOP_MULT    = 1.5
 
-TERMINAL_WIN      = 1.0
-TERMINAL_LOSS     = -1.0
+TERMINAL_WIN      = 2.0   # reward wins moderately
+TERMINAL_LOSS     = -3.0  # punish losses harder — break-even at 60% WR
 TERMINAL_DRAW     = 0.0
 
-FORCE_1V1 = True   # all training games are 1v1 — faster, cleaner signal, 50% win baseline
+FORCE_1V1 = True
 
 # ── Critic warm-up ─────────────────────────────────────────────────────────
-# Fresh critic gives noisy value estimates → noisy advantages → bad PPO.
-# For the first CRITIC_WARMUP_ROUNDS rounds the actor is frozen: only the
-# critic is updated so it can calibrate V(s) before PPO fine-tunes the actor.
 CRITIC_WARMUP_ROUNDS = 20
+
+# ── Curriculum ─────────────────────────────────────────────────────────────
+# Manual progression — change START_TIER before each session:
+#   0 → Tier 1 only (5 easy bots)       — Session 1
+#   1 → Tier 1 + Tier 2 (10 bots)       — Session 2 (if curve looks good)
+#   2 → All tiers (15 bots)             — Session 3+
+#
+# Tiers ranked by tournament 1v1 win rate (easy → hard):
+CURRICULUM_TIERS = [
+    # Tier 1 — easy  (0–14% WR in tournament)
+    ['tamrazov-starwars', 'pascal-orbitwork-v14', 'main_5',
+     'yuriygreben-architect', 'sigmaborov-reinforce'],
+    # Tier 2 — medium  (28–50% WR in tournament)
+    ['sigmaborov-starter', 'main_4', 'main_2', 'regressor', 'main_3'],
+    # Tier 3 — hard  (57–85% WR in tournament)
+    ['pilkwang-structured', 'ykhnkf-distance-prioritized', 'classifier_bot',
+     'main_1', 'main'],
+]
+
+START_TIER = 0   # ← CHANGE THIS each session (0, 1, or 2)
 
 
 def _ent_coef(rnd: int, start_rnd: int) -> float:
@@ -734,19 +751,45 @@ def train(n_rounds:        int  = N_ROUNDS,
     _std_paths = glob.glob(str(ENEMY_DIR / "*" / "main.py"))
     _my_paths  = [p for p in glob.glob(str(ENEMY_DIR / "my" / "*.py"))
                   if not Path(p).name.startswith("__")]
-    enemies = []
+    all_enemies: dict = {}   # label → fn
     for ef in sorted(_std_paths + _my_paths):
         p     = Path(ef)
         label = p.stem if p.parent.name == "my" else p.parent.name
         try:
             fn, _ = load_agent(ef)
-            enemies.append((label, fn))
+            all_enemies[label] = fn
             print(f"  Enemy loaded: {label}")
         except Exception as e:
             print(f"  WARN {label}: {e}")
 
-    if not enemies:
+    if not all_enemies:
         print(f"No enemy agents found in {ENEMY_DIR}"); return None
+
+    # ── Curriculum pool setup ──────────────────────────────────────────────
+    # Build per-tier enemy lists from loaded agents.
+    # Any label not found in CURRICULUM_TIERS falls into the last tier.
+    enemy_tier_agents: list = []   # list of lists: [(label, fn), ...]
+    assigned = set()
+    for tier_labels in CURRICULUM_TIERS:
+        tier = [(lbl, all_enemies[lbl]) for lbl in tier_labels if lbl in all_enemies]
+        enemy_tier_agents.append(tier)
+        assigned.update(lbl for lbl in tier_labels if lbl in all_enemies)
+
+    # Leftover enemies not in any tier go to the last tier
+    leftover = [(lbl, fn) for lbl, fn in all_enemies.items() if lbl not in assigned]
+    if leftover:
+        enemy_tier_agents[-1].extend(leftover)
+        print(f"  {len(leftover)} untiered enemies added to Tier {len(CURRICULUM_TIERS)}")
+
+    # Include all tiers up to START_TIER
+    active_enemies = []
+    for t in range(min(START_TIER + 1, len(enemy_tier_agents))):
+        active_enemies.extend(enemy_tier_agents[t])
+
+    for t, tier in enumerate(enemy_tier_agents):
+        status = "ACTIVE" if t <= START_TIER else "locked"
+        print(f"  Tier {t+1} [{status}]: {[lbl for lbl, _ in tier]}")
+    print(f"  Active pool: {len(active_enemies)} enemies  (START_TIER={START_TIER})")
 
     n_actor  = sum(p.numel() for p in actor.parameters()  if p.requires_grad)
     n_critic = sum(p.numel() for p in critic.parameters() if p.requires_grad)
@@ -767,15 +810,15 @@ def train(n_rounds:        int  = N_ROUNDS,
 
         for g in range(games_per_round):
             if FORCE_1V1:
-                filler   = random.choice(enemies)
+                filler   = random.choice(active_enemies)
                 fns      = [None, filler[1]]
                 mode_tag = "1v1"
             elif g % 3 == 0:
-                filler   = random.choice(enemies)
+                filler   = random.choice(active_enemies)
                 fns      = [None, filler[1]]
                 mode_tag = "1v1"
             else:
-                fillers  = random.choices(enemies, k=min(3, len(enemies)))
+                fillers  = random.choices(active_enemies, k=min(3, len(active_enemies)))
                 fns      = [None] + [fn for _, fn in fillers]
                 mode_tag = "4p"
 
@@ -884,6 +927,7 @@ def train(n_rounds:        int  = N_ROUNDS,
               f"kl={avg_kl:.4f}  clip={clipfrac:.3f}  ent_coef={ent_coef_val:.4f}"
               f"\n     reward:  events={event_sum:+.2f}  momentum={mom_sum:+.2f}  "
               f"terminal={term_sum:+.2f}  total={shaped_sum + term_sum:+.2f}"
+              f"  tier={START_TIER+1}/{len(enemy_tier_agents)}"
               f"{warmup_str}{tag}")
 
     print(f"\nDone. Best PPO WR={best_wr_ppo:.1%}")
