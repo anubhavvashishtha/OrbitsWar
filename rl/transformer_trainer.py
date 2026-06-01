@@ -641,10 +641,10 @@ def play_game_collect(actor: EdgeTransformerNet,
         buf.rewards[-1]    = term   # override last step — game over
         buf.dones[-1]      = True
 
-        # Wins keep events/momentum to reinforce which specific actions won.
-        # Losses and draws are zeroed — only the terminal signal matters.
-        # Draws are penalised (-0.5) to push agent beyond draw strategy toward wins.
-        if outcome in ("LOSS", "DRAW"):
+        # Wins and draws keep events/momentum — the agent should get credit
+        # for active play even in draws (penalised by terminal -0.5).
+        # Only losses are zeroed so the loss signal is clean.
+        if outcome == "LOSS":
             for i in range(len(buf.rewards) - 1):
                 buf.rewards[i] = 0.0
     else:
