@@ -54,6 +54,11 @@ sys.path.insert(0, str(IMITATION_DIR))
 from model    import EdgeTransformerNet, load_model as load_actor
 from features import build_all_candidate_edges
 
+# Cache build_world NOW before any enemy agents are loaded into sys.path.
+# Enemy main.py files don't have build_world — lazy imports inside functions
+# would find the wrong main.py after load_agent() adds enemy dirs to sys.path.
+from main import build_world as _build_world
+
 # ── imports from RL helpers ───────────────────────────────────────────────
 from self_play_trainer import (
     load_agent, snap, _read,
@@ -98,8 +103,8 @@ TARGET_KL       = 0.02    # stop early if policy diverges — prevents collapse
 KL_STOP_MULT    = 1.5
 
 TERMINAL_WIN      = 1.0
-TERMINAL_LOSS     = -2.5
-TERMINAL_DRAW     = 0.0
+TERMINAL_LOSS     = -1.5
+TERMINAL_DRAW     = -0.5
 
 FORCE_1V1 = True
 
@@ -181,7 +186,6 @@ def create_snapshot_agent(actor: EdgeTransformerNet, device: str):
 
     def agent_fn(obs):
         try:
-            from main import build_world
             candidates = build_all_candidate_edges(obs)
             if not candidates:
                 return []
@@ -192,7 +196,7 @@ def create_snapshot_agent(actor: EdgeTransformerNet, device: str):
                 al, fl   = snapshot(X, pad_mask=None)
                 act_prob = torch.sigmoid(al.squeeze(0).squeeze(-1)).cpu().numpy()
                 fraction = torch.sigmoid(fl.squeeze(0).squeeze(-1)).cpu().numpy()
-            world      = build_world(obs)
+            world      = _build_world(obs)
             planet_map = {p.id: p for p in world.planets}
             spent: dict = {}
             moves = []
@@ -446,8 +450,6 @@ def _build_moves(obs: dict, actor: EdgeTransformerNet, device: str):
     log_prob used for the PPO ratio.  Edges that do not fire are dropped —
     they produce no gradient signal.
     """
-    from main import build_world
-
     candidates = build_all_candidate_edges(obs)
     if not candidates:
         return None, [], None, []
@@ -467,7 +469,7 @@ def _build_moves(obs: dict, actor: EdgeTransformerNet, device: str):
     # Execute top-K edges strictly above threshold — same as submission agent
     executed_indices = []
     try:
-        world      = build_world(obs)
+        world      = _build_world(obs)
         planet_map = {p.id: p for p in world.planets}
         spent      = defaultdict(int)
         moves      = []
@@ -639,11 +641,10 @@ def play_game_collect(actor: EdgeTransformerNet,
         buf.rewards[-1]    = term   # override last step — game over
         buf.dones[-1]      = True
 
-        # Asymmetric shaped rewards: for losses zero out all per-turn rewards
-        # so the only signal is the terminal penalty.  For wins, events/momentum
-        # remain to reinforce which specific actions led to the win.
-        # This prevents the agent learning "capture planets even in losing games."
-        if outcome == "LOSS":
+        # Wins keep events/momentum to reinforce which specific actions won.
+        # Losses and draws are zeroed — only the terminal signal matters.
+        # Draws are penalised (-0.5) to push agent beyond draw strategy toward wins.
+        if outcome in ("LOSS", "DRAW"):
             for i in range(len(buf.rewards) - 1):
                 buf.rewards[i] = 0.0
     else:
