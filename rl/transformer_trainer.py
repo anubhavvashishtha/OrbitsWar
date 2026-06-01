@@ -98,7 +98,7 @@ TARGET_KL       = 0.02    # stop early if policy diverges — prevents collapse
 KL_STOP_MULT    = 1.5
 
 TERMINAL_WIN      = 1.0
-TERMINAL_LOSS     = -1.0
+TERMINAL_LOSS     = -2.5
 TERMINAL_DRAW     = 0.0
 
 FORCE_1V1 = True
@@ -108,20 +108,35 @@ CRITIC_WARMUP_ROUNDS = 20
 
 # ── Curriculum ─────────────────────────────────────────────────────────────
 # Manual progression — change START_TIER before each session:
-#   0 → Tier 1 only (5 easy bots)       — Session 1
-#   1 → Tier 1 + Tier 2 (10 bots)       — Session 2 (if curve looks good)
-#   2 → All tiers (15 bots)             — Session 3+
+#   0 → Tier 1 only        — Session 1
+#   1 → Tier 1 + Tier 2    — Session 2
+#   2 → All tiers          — Session 3+
 #
-# Tiers ranked by tournament 1v1 win rate (easy → hard):
-CURRICULUM_TIERS = [
-    # Tier 1 — easy  (0–14% WR in tournament)
-    ['tamrazov-starwars', 'pascal-orbitwork-v14', 'main_5',
-     'yuriygreben-architect', 'sigmaborov-reinforce'],
-    # Tier 2 — medium  (28–50% WR in tournament)
-    ['sigmaborov-starter', 'main_4', 'main_2', 'regressor', 'main_3'],
-    # Tier 3 — hard  (57–85% WR in tournament)
-    ['pilkwang-structured', 'ykhnkf-distance-prioritized', 'classifier_bot',
-     'main_1', 'main'],
+# Separate tiers for 1v1 and 4v4 — agents perform very differently in each mode.
+# Source: internal round-robin tournament (tournament_results.json).
+
+CURRICULUM_TIERS_1V1 = [
+    # Tier 1 — easy  (0–28% 1v1 WR)
+    ['pascal-orbitwork-v14', 'tamrazov-starwars',
+     'yuriygreben-architect', 'sigmaborov-starter', 'main_4'],
+    # Tier 2 — medium  (42–57% 1v1 WR)
+    ['main_5', 'main_2', 'main_3',
+     'sigmaborov-reinforce', 'pilkwang-structured'],
+    # Tier 3 — hard  (71–85% 1v1 WR)
+    ['regressor', 'ykhnkf-distance-prioritized',
+     'classifier_bot', 'main_1', 'main'],
+]
+
+CURRICULUM_TIERS_4V4 = [
+    # Tier 1 — easy  (0 wins, worst avg rank in 4v4)
+    ['main_5', 'pascal-orbitwork-v14', 'tamrazov-starwars',
+     'sigmaborov-reinforce', 'main'],
+    # Tier 2 — medium  (0–1 wins, mixed avg rank)
+    ['yuriygreben-architect', 'sigmaborov-starter',
+     'regressor', 'main_4', 'main_2'],
+    # Tier 3 — hard  (1–3 wins, best avg rank)
+    ['pilkwang-structured', 'classifier_bot',
+     'main_3', 'ykhnkf-distance-prioritized', 'main_1'],
 ]
 
 START_TIER = 1   # ← CHANGE THIS each session (0, 1, or 2)
@@ -623,6 +638,14 @@ def play_game_collect(actor: EdgeTransformerNet,
         buf.terminal_bonus = term
         buf.rewards[-1]    = term   # override last step — game over
         buf.dones[-1]      = True
+
+        # Asymmetric shaped rewards: for losses zero out all per-turn rewards
+        # so the only signal is the terminal penalty.  For wins, events/momentum
+        # remain to reinforce which specific actions led to the win.
+        # This prevents the agent learning "capture planets even in losing games."
+        if outcome == "LOSS":
+            for i in range(len(buf.rewards) - 1):
+                buf.rewards[i] = 0.0
     else:
         outcome = "DRAW"
 
@@ -820,6 +843,13 @@ def train(n_rounds:        int  = N_ROUNDS,
                     ent_ramp_start = start_rnd   # fresh decay from this session
                 else:
                     ent_ramp_start = ckpt.get("ent_ramp_start", start_rnd)
+                # One-time manual override for old checkpoints missing ent_ramp_start.
+                # Set _ENT_RAMP_START_OVERRIDE in the notebook before calling train().
+                override = getattr(
+                    __import__('rl.transformer_trainer', fromlist=['']),
+                    '_ENT_RAMP_START_OVERRIDE', None)
+                if override is not None:
+                    ent_ramp_start = override
                 is_fresh_start = False
                 print(f"Resumed from {resume_path.name}  "
                       f"(round {start_rnd-1}, best_wr_ppo={best_wr_ppo:.1%})")
@@ -866,40 +896,36 @@ def train(n_rounds:        int  = N_ROUNDS,
         print(f"No enemy agents found in {ENEMY_DIR}"); return None
 
     # ── Curriculum pool setup ──────────────────────────────────────────────
-    # Build per-tier enemy lists from loaded agents.
-    # Any label not found in CURRICULUM_TIERS falls into the last tier.
-    enemy_tier_agents: list = []   # list of lists: [(label, fn), ...]
-    assigned = set()
-    for tier_labels in CURRICULUM_TIERS:
-        tier = [(lbl, all_enemies[lbl]) for lbl in tier_labels if lbl in all_enemies]
-        enemy_tier_agents.append(tier)
-        assigned.update(lbl for lbl in tier_labels if lbl in all_enemies)
+    def _build_pools(tier_labels_list, label):
+        """Build per-tier (label, fn) lists and active tier pools for one mode."""
+        tier_agents = []
+        assigned = set()
+        for tier_labels in tier_labels_list:
+            tier = [(lbl, all_enemies[lbl]) for lbl in tier_labels if lbl in all_enemies]
+            tier_agents.append(tier)
+            assigned.update(lbl for lbl in tier_labels if lbl in all_enemies)
+        leftover = [(lbl, fn) for lbl, fn in all_enemies.items() if lbl not in assigned]
+        if leftover:
+            tier_agents[-1].extend(leftover)
+            print(f"  [{label}] {len(leftover)} untiered enemies added to Tier {len(tier_labels_list)}")
+        active = [tier_agents[t] for t in range(min(START_TIER + 1, len(tier_agents))) if tier_agents[t]]
+        flat   = [e for pool in active for e in pool]
+        return tier_agents, active, flat
 
-    # Leftover enemies not in any tier go to the last tier
-    leftover = [(lbl, fn) for lbl, fn in all_enemies.items() if lbl not in assigned]
-    if leftover:
-        enemy_tier_agents[-1].extend(leftover)
-        print(f"  {len(leftover)} untiered enemies added to Tier {len(CURRICULUM_TIERS)}")
+    tier_agents_1v1, active_tier_pools_1v1, active_enemies_1v1 = _build_pools(CURRICULUM_TIERS_1V1, "1v1")
+    tier_agents_4v4, active_tier_pools_4v4, active_enemies_4v4 = _build_pools(CURRICULUM_TIERS_4V4, "4v4")
 
-    # Include all tiers up to START_TIER
-    active_enemies = []
-    for t in range(min(START_TIER + 1, len(enemy_tier_agents))):
-        active_enemies.extend(enemy_tier_agents[t])
-
-    # Per-tier pools for balanced sampling — guarantees equal games per tier per round.
-    # Falls back to flat active_enemies if only one tier is active.
-    active_tier_pools = [
-        enemy_tier_agents[t]
-        for t in range(min(START_TIER + 1, len(enemy_tier_agents)))
-        if enemy_tier_agents[t]
-    ]
-
-    for t, tier in enumerate(enemy_tier_agents):
+    print("\n  1v1 curriculum:")
+    for t, tier in enumerate(tier_agents_1v1):
         status = "ACTIVE" if t <= START_TIER else "locked"
-        print(f"  Tier {t+1} [{status}]: {[lbl for lbl, _ in tier]}")
-    n_tiers = len(active_tier_pools)
-    print(f"  Active pool: {len(active_enemies)} enemies across {n_tiers} tier(s)  "
-          f"(START_TIER={START_TIER}, balanced={n_tiers > 1})")
+        print(f"    Tier {t+1} [{status}]: {[lbl for lbl, _ in tier]}")
+    print(f"    Active: {len(active_enemies_1v1)} enemies across {len(active_tier_pools_1v1)} tier(s)")
+
+    print(f"  4v4 curriculum: {'DISABLED (FORCE_1V1=True)' if FORCE_1V1 else 'enabled'}")
+    for t, tier in enumerate(tier_agents_4v4):
+        status = ("ready" if t <= START_TIER else "locked") if not FORCE_1V1 else "idle"
+        print(f"    Tier {t+1} [{status}]: {[lbl for lbl, _ in tier]}")
+    print(f"    Pool built: {len(active_enemies_4v4)} enemies — not used while FORCE_1V1=True")
 
     n_actor  = sum(p.numel() for p in actor.parameters()  if p.requires_grad)
     n_critic = sum(p.numel() for p in critic.parameters() if p.requires_grad)
@@ -918,24 +944,27 @@ def train(n_rounds:        int  = N_ROUNDS,
         wins = losses = draws = 0
         all_bufs: list = []
 
-        for g in range(games_per_round):
-            # Balanced tier sampling: interleave tiers so each gets exactly
-            # games_per_round // n_tiers games.  Falls back to flat pool if
-            # only one tier is active or self-play snapshots are the only pool.
-            pool = active_tier_pools[g % len(active_tier_pools)] if active_tier_pools else active_enemies
+        g_1v1 = g_4v4 = 0   # separate counters for balanced tier interleaving per mode
 
+        for g in range(games_per_round):
             if FORCE_1V1:
-                filler   = random.choice(pool)
-                fns      = [None, filler[1]]
                 mode_tag = "1v1"
+                pool = active_tier_pools_1v1[g_1v1 % len(active_tier_pools_1v1)] if active_tier_pools_1v1 else active_enemies_1v1
+                g_1v1 += 1
+                filler = random.choice(pool)
+                fns    = [None, filler[1]]
             elif g % 2 == 0:
-                filler   = random.choice(pool)
-                fns      = [None, filler[1]]
                 mode_tag = "1v1"
+                pool = active_tier_pools_1v1[g_1v1 % len(active_tier_pools_1v1)] if active_tier_pools_1v1 else active_enemies_1v1
+                g_1v1 += 1
+                filler = random.choice(pool)
+                fns    = [None, filler[1]]
             else:
-                fillers  = random.choices(pool, k=min(3, len(pool)))
-                fns      = [None] + [fn for _, fn in fillers]
                 mode_tag = "4p"
+                pool = active_tier_pools_4v4[g_4v4 % len(active_tier_pools_4v4)] if active_tier_pools_4v4 else active_enemies_4v4
+                g_4v4 += 1
+                fillers = random.choices(pool, k=min(3, len(pool)))
+                fns     = [None] + [fn for _, fn in fillers]
 
             seed = 42 + rnd * 1000 + g
 
@@ -1028,16 +1057,23 @@ def train(n_rounds:        int  = N_ROUNDS,
         if SELFPLAY_ENABLED and rnd % SELFPLAY_SNAPSHOT_EVERY == 0:
             snap_fn    = create_snapshot_agent(actor, device)
             snap_label = f'self_r{rnd}'
-            active_enemies.append((snap_label, snap_fn))
-            # Drop oldest if over limit
-            self_snaps = [(l, f) for l, f in active_enemies if l.startswith('self_')]
-            if len(self_snaps) > SELFPLAY_MAX_SNAPSHOTS:
-                oldest = self_snaps[0][0]
-                active_enemies = [(l, f) for l, f in active_enemies if l != oldest]
+            # Add snapshot to both mode pools (last active tier in each)
+            active_tier_pools_1v1[-1].append((snap_label, snap_fn))
+            active_tier_pools_4v4[-1].append((snap_label, snap_fn))
+            active_enemies_1v1.append((snap_label, snap_fn))
+            active_enemies_4v4.append((snap_label, snap_fn))
+            # Drop oldest snapshot if over limit
+            self_snaps_1v1 = [(l, f) for l, f in active_enemies_1v1 if l.startswith('self_')]
+            if len(self_snaps_1v1) > SELFPLAY_MAX_SNAPSHOTS:
+                oldest = self_snaps_1v1[0][0]
+                active_tier_pools_1v1[-1] = [(l, f) for l, f in active_tier_pools_1v1[-1] if l != oldest]
+                active_tier_pools_4v4[-1] = [(l, f) for l, f in active_tier_pools_4v4[-1] if l != oldest]
+                active_enemies_1v1[:] = [(l, f) for l, f in active_enemies_1v1 if l != oldest]
+                active_enemies_4v4[:] = [(l, f) for l, f in active_enemies_4v4 if l != oldest]
                 print(f"\n  Self-play: dropped {oldest}, kept {SELFPLAY_MAX_SNAPSHOTS} snapshots")
-            n_snaps = len([l for l, _ in active_enemies if l.startswith('self_')])
+            n_snaps = len([l for l, _ in active_enemies_1v1 if l.startswith('self_')])
             print(f"\n  Self-play snapshot saved: {snap_label}  "
-                  f"({n_snaps} snapshots in pool, total pool={len(active_enemies)})")
+                  f"({n_snaps} snapshots in pool)")
 
         if not freeze_actor and wr > best_wr_ppo:
             best_wr_ppo = wr
@@ -1058,7 +1094,7 @@ def train(n_rounds:        int  = N_ROUNDS,
               f"kl={avg_kl:.4f}  clip={clipfrac:.3f}  ent_coef={ent_coef_val:.4f}"
               f"\n     reward:  events={event_sum:+.2f}  momentum={mom_sum:+.2f}  "
               f"terminal={term_sum:+.2f}  total={shaped_sum + term_sum:+.2f}"
-              f"  tier={START_TIER+1}/{len(enemy_tier_agents)}"
+              f"  tier={START_TIER+1}/{len(CURRICULUM_TIERS_1V1)}"
               f"{warmup_str}{tag}")
 
     print(f"\nDone. Best PPO WR={best_wr_ppo:.1%}")
