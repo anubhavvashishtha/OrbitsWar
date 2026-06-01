@@ -74,7 +74,7 @@ CURVES_PATH         = ROOT / "transformer_curves.png"
 
 # ── hyper-parameters ──────────────────────────────────────────────────────
 N_ROUNDS        = 30      # ← set to 30 for test run, increase after checking results
-GAMES_PER_ROUND = 16
+GAMES_PER_ROUND = 32
 LR_ACTOR        = 1e-5    # tighter than before — prevents policy collapse
 LR_CRITIC       = 1e-4
 CLIP_EPS        = 0.1     # tighter clipping — less aggressive policy change
@@ -88,6 +88,11 @@ TOP_K_EDGES      = 5
 ENT_COEF_START = 0.01
 ENT_COEF_END   = 0.002
 ENT_COEF_RAMP  = 50
+
+# Set True to reset entropy ramp at session start (good for tier changes).
+# Set False to continue entropy decay from where the last session left off
+# (good for same-tier resumptions).
+RESET_ENT_ON_RESUME = True
 
 TARGET_KL       = 0.02    # stop early if policy diverges — prevents collapse
 KL_STOP_MULT    = 1.5
@@ -119,7 +124,7 @@ CURRICULUM_TIERS = [
      'main_1', 'main'],
 ]
 
-START_TIER = 0   # ← CHANGE THIS each session (0, 1, or 2)
+START_TIER = 1   # ← CHANGE THIS each session (0, 1, or 2)
 
 # ── Self-play ───────────────────────────────────────────────────────────────
 # Disabled by default — enable for local 24h runs after curriculum is complete.
@@ -796,6 +801,7 @@ def train(n_rounds:        int  = N_ROUNDS,
     # ── Resume from transformer checkpoint if available ────────────────────
     best_wr_ppo    = 0.0
     start_rnd      = 1
+    ent_ramp_start = 1
     avg_loss       = 0.0
     avg_ent        = 0.0
     is_fresh_start = True   # flipped to False if a checkpoint loads successfully
@@ -810,6 +816,10 @@ def train(n_rounds:        int  = N_ROUNDS,
                 if ckpt.get("epoch", 0) <= CRITIC_WARMUP_ROUNDS:
                     best_wr_ppo = 0.0
                 start_rnd      = ckpt.get("epoch", 1) + 1
+                if RESET_ENT_ON_RESUME:
+                    ent_ramp_start = start_rnd   # fresh decay from this session
+                else:
+                    ent_ramp_start = ckpt.get("ent_ramp_start", start_rnd)
                 is_fresh_start = False
                 print(f"Resumed from {resume_path.name}  "
                       f"(round {start_rnd-1}, best_wr_ppo={best_wr_ppo:.1%})")
@@ -876,10 +886,20 @@ def train(n_rounds:        int  = N_ROUNDS,
     for t in range(min(START_TIER + 1, len(enemy_tier_agents))):
         active_enemies.extend(enemy_tier_agents[t])
 
+    # Per-tier pools for balanced sampling — guarantees equal games per tier per round.
+    # Falls back to flat active_enemies if only one tier is active.
+    active_tier_pools = [
+        enemy_tier_agents[t]
+        for t in range(min(START_TIER + 1, len(enemy_tier_agents)))
+        if enemy_tier_agents[t]
+    ]
+
     for t, tier in enumerate(enemy_tier_agents):
         status = "ACTIVE" if t <= START_TIER else "locked"
         print(f"  Tier {t+1} [{status}]: {[lbl for lbl, _ in tier]}")
-    print(f"  Active pool: {len(active_enemies)} enemies  (START_TIER={START_TIER})")
+    n_tiers = len(active_tier_pools)
+    print(f"  Active pool: {len(active_enemies)} enemies across {n_tiers} tier(s)  "
+          f"(START_TIER={START_TIER}, balanced={n_tiers > 1})")
 
     n_actor  = sum(p.numel() for p in actor.parameters()  if p.requires_grad)
     n_critic = sum(p.numel() for p in critic.parameters() if p.requires_grad)
@@ -899,18 +919,21 @@ def train(n_rounds:        int  = N_ROUNDS,
         all_bufs: list = []
 
         for g in range(games_per_round):
+            # Balanced tier sampling: interleave tiers so each gets exactly
+            # games_per_round // n_tiers games.  Falls back to flat pool if
+            # only one tier is active or self-play snapshots are the only pool.
+            pool = active_tier_pools[g % len(active_tier_pools)] if active_tier_pools else active_enemies
+
             if FORCE_1V1:
-                filler   = random.choice(active_enemies)
+                filler   = random.choice(pool)
                 fns      = [None, filler[1]]
                 mode_tag = "1v1"
             elif g % 2 == 0:
-                # 50/50 split: even games → 1v1, odd → 4v4
-                filler   = random.choice(active_enemies)
+                filler   = random.choice(pool)
                 fns      = [None, filler[1]]
                 mode_tag = "1v1"
             else:
-                # 4v4: 3 opponents — mix of curriculum bots and self-play snapshots
-                fillers  = random.choices(active_enemies, k=min(3, len(active_enemies)))
+                fillers  = random.choices(pool, k=min(3, len(pool)))
                 fns      = [None] + [fn for _, fn in fillers]
                 mode_tag = "4p"
 
@@ -939,7 +962,7 @@ def train(n_rounds:        int  = N_ROUNDS,
         # Warm-up only on a fresh start (no prior checkpoint).
         # When resuming, the critic is already calibrated — skip immediately.
         freeze_actor  = is_fresh_start and ((rnd - 1) < CRITIC_WARMUP_ROUNDS)
-        ent_coef_val  = _ent_coef(rnd, start_rnd)
+        ent_coef_val  = _ent_coef(rnd, ent_ramp_start)
         stats = ppo_update(
             actor, critic, optimizer,
             all_bufs, device,
@@ -990,6 +1013,7 @@ def train(n_rounds:        int  = N_ROUNDS,
 
         ckpt = {
             "epoch": rnd,
+            "ent_ramp_start": ent_ramp_start,
             "best_wr": best_wr_ppo,
             "best_wr_ppo": best_wr_ppo,
             "loss": avg_loss,
