@@ -69,6 +69,18 @@ from self_play_trainer import (
     ELIMINATION_BONUS, MOMENTUM_SCALE,
 )
 
+# ── Scale events down so terminal signal dominates ────────────────────────
+# _event_reward() reads CAPTURE_BASE etc. from self_play_trainer's globals,
+# so we patch the module directly. MOMENTUM_SCALE is rebound locally because
+# it's used inline (line ~567) from this module's namespace.
+import self_play_trainer as _spt
+_E = 0.2   # 5× reduction: events ~8/round vs terminal ~20/round at current WR
+_spt.CAPTURE_BASE       = _spt.CAPTURE_BASE       * _E
+_spt.CAPTURE_FROM_ENEMY = _spt.CAPTURE_FROM_ENEMY * _E
+_spt.PLANET_LOSS        = _spt.PLANET_LOSS        * _E
+_spt.ELIMINATION_BONUS  = _spt.ELIMINATION_BONUS  * _E
+MOMENTUM_SCALE          = MOMENTUM_SCALE          * _E
+
 # ── paths ─────────────────────────────────────────────────────────────────
 DEFAULT_ACTOR_PATH  = IMITATION_DIR / "checkpoints" / "best_model.pt"
 DEFAULT_CRITIC_PATH = ROOT / "last.pt"      # OrbitsNet checkpoint (for warm-start)
@@ -90,9 +102,9 @@ MINI_BATCH      = 64
 ACTION_THRESHOLD = 0.35
 TOP_K_EDGES      = 5
 
-ENT_COEF_START = 0.01
-ENT_COEF_END   = 0.002
-ENT_COEF_RAMP  = 50
+ENT_COEF_START = 0.02
+ENT_COEF_END   = 0.005
+ENT_COEF_RAMP  = 40
 
 # Set True to reset entropy ramp at session start (good for tier changes).
 # Set False to continue entropy decay from where the last session left off
@@ -102,9 +114,9 @@ RESET_ENT_ON_RESUME = True
 TARGET_KL       = 0.02    # stop early if policy diverges — prevents collapse
 KL_STOP_MULT    = 1.5
 
-TERMINAL_WIN      = 1.0
+TERMINAL_WIN      = 3.0
 TERMINAL_LOSS     = -1.5
-TERMINAL_DRAW     = -0.5
+TERMINAL_DRAW     = -1.5   # equal to LOSS — draws are indistinguishable from losses so agent stops turtling
 
 FORCE_1V1 = True
 
@@ -641,12 +653,13 @@ def play_game_collect(actor: EdgeTransformerNet,
         buf.rewards[-1]    = term   # override last step — game over
         buf.dones[-1]      = True
 
-        # Wins and draws keep events/momentum — the agent should get credit
-        # for active play even in draws (penalised by terminal -0.5).
-        # Only losses are zeroed so the loss signal is clean.
-        if outcome == "LOSS":
+        # Only wins keep event/momentum credit.
+        # Draws and losses are both zeroed — agent has one path to positive reward: win.
+        if outcome in ("LOSS", "DRAW"):
             for i in range(len(buf.rewards) - 1):
                 buf.rewards[i] = 0.0
+            buf.total_events   = 0.0
+            buf.total_momentum = 0.0
     else:
         outcome = "DRAW"
 
