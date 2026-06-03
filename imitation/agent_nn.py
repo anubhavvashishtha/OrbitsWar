@@ -176,7 +176,7 @@ def build_moves_from_scores(
     for act_prob, fraction, src_id, tgt_id in scored_edges:
         if committed >= top_k:
             break
-        if act_prob < prob_threshold:
+        if committed > 0 and act_prob < prob_threshold:
             break
 
         src = planet_map.get(src_id)

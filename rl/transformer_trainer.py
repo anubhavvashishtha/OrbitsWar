@@ -74,7 +74,7 @@ from self_play_trainer import (
 # so we patch the module directly. MOMENTUM_SCALE is rebound locally because
 # it's used inline (line ~567) from this module's namespace.
 import self_play_trainer as _spt
-_E = 0.2   # 5× reduction: events ~8/round vs terminal ~20/round at current WR
+_E = 1.5   # events max ~7.2/game vs terminal -8.0 → strong planet-capture signal, still unhackable
 _spt.CAPTURE_BASE       = _spt.CAPTURE_BASE       * _E
 _spt.CAPTURE_FROM_ENEMY = _spt.CAPTURE_FROM_ENEMY * _E
 _spt.PLANET_LOSS        = _spt.PLANET_LOSS        * _E
@@ -88,11 +88,12 @@ SAVE_PATH           = ROOT / "transformer_last.pt"
 BEST_PATH           = ROOT / "transformer_best.pt"
 HISTORY_PATH        = ROOT / "transformer_history.json"
 CURVES_PATH         = ROOT / "transformer_curves.png"
+ENEMY_STATS_PATH    = ROOT / "enemy_stats.json"
 
 # ── hyper-parameters ──────────────────────────────────────────────────────
 N_ROUNDS        = 30      # ← set to 30 for test run, increase after checking results
 GAMES_PER_ROUND = 32
-LR_ACTOR        = 1e-5    # tighter than before — prevents policy collapse
+LR_ACTOR        = 5e-6    # tighter than before — prevents policy collapse
 LR_CRITIC       = 1e-4
 CLIP_EPS        = 0.1     # tighter clipping — less aggressive policy change
 VAL_COEF        = 0.5
@@ -103,7 +104,7 @@ ACTION_THRESHOLD = 0.35
 TOP_K_EDGES      = 5
 
 ENT_COEF_START = 0.02
-ENT_COEF_END   = 0.005
+ENT_COEF_END   = 0.02   # constant — no decay for hard-tier training
 ENT_COEF_RAMP  = 40
 
 # Set True to reset entropy ramp at session start (good for tier changes).
@@ -114,9 +115,10 @@ RESET_ENT_ON_RESUME = True
 TARGET_KL       = 0.02    # stop early if policy diverges — prevents collapse
 KL_STOP_MULT    = 1.5
 
-TERMINAL_WIN      = 3.0
-TERMINAL_LOSS     = -1.5
-TERMINAL_DRAW     = -1.5   # equal to LOSS — draws are indistinguishable from losses so agent stops turtling
+# Only two outcomes exist: WIN or LOSS.
+# Timeout always yields a winner by ship count; mutual elimination is LOSS.
+TERMINAL_WIN  =  8.0
+TERMINAL_LOSS = -8.0
 
 FORCE_1V1 = True
 
@@ -124,24 +126,17 @@ FORCE_1V1 = True
 CRITIC_WARMUP_ROUNDS = 20
 
 # ── Curriculum ─────────────────────────────────────────────────────────────
-# Manual progression — change START_TIER before each session:
-#   0 → Tier 1 only        — Session 1
-#   1 → Tier 1 + Tier 2    — Session 2
-#   2 → All tiers          — Session 3+
-#
-# Separate tiers for 1v1 and 4v4 — agents perform very differently in each mode.
-# Source: internal round-robin tournament (tournament_results.json).
+# Tier progression is fully automatic via PROMOTE/DEMOTE thresholds below.
+# Change START_TIER each session to control which tier to train on.
 
 CURRICULUM_TIERS_1V1 = [
-    # Tier 1 — easy  (0–28% 1v1 WR)
-    ['pascal-orbitwork-v14', 'tamrazov-starwars',
-     'yuriygreben-architect', 'sigmaborov-starter', 'main_4'],
-    # Tier 2 — medium  (42–57% 1v1 WR)
-    ['main_5', 'main_2', 'main_3',
-     'sigmaborov-reinforce', 'pilkwang-structured'],
-    # Tier 3 — hard  (71–85% 1v1 WR)
-    ['regressor', 'ykhnkf-distance-prioritized',
-     'classifier_bot', 'main_1', 'main'],
+    # Tier 1 — easy   (agent WR 80-100% in eval)
+    ['main', 'tamrazov-starwars', 'yuriygreben-architect', 'pascal-orbitwork-v14'],
+    # Tier 2 — medium (agent WR ~13% in eval)
+    ['sigmaborov-starter', 'main_4', 'main_5'],
+    # Tier 3 — hard   (agent WR 0% in eval — currently unbeatable)
+    ['main_1', 'main_2', 'main_3', 'pilkwang-structured',
+     'regressor', 'sigmaborov-reinforce', 'ykhnkf-distance-prioritized', 'classifier_bot'],
 ]
 
 CURRICULUM_TIERS_4V4 = [
@@ -156,7 +151,9 @@ CURRICULUM_TIERS_4V4 = [
      'main_3', 'ykhnkf-distance-prioritized', 'main_1'],
 ]
 
-START_TIER = 1   # ← CHANGE THIS each session (0, 1, or 2)
+START_TIER       = 1     # ← CHANGE THIS each session (0=easy, 1=medium, 2=hard)
+START_TIER_PURE  = True  # True = only the START_TIER pool, no lower tiers mixed in
+                         # False = cumulative (START_TIER=1 gives Tier1+Tier2, etc.)
 
 # ── Self-play ───────────────────────────────────────────────────────────────
 # Disabled by default — enable for local 24h runs after curriculum is complete.
@@ -491,8 +488,8 @@ def _build_moves(obs: dict, actor: EdgeTransformerNet, device: str):
         for i in order:
             if committed >= TOP_K_EDGES:
                 break
-            if act_prob[i] < ACTION_THRESHOLD:
-                break   # list is sorted descending — nothing below this is worth taking
+            if committed > 0 and act_prob[i] < ACTION_THRESHOLD:
+                break   # threshold only applied after first move is committed
             src_id, tgt_id = edge_list[i]
             src = planet_map.get(src_id)
             tgt = planet_map.get(tgt_id)
@@ -622,46 +619,44 @@ def play_game_collect(actor: EdgeTransformerNet,
         step  += 1
 
     # ── Terminal reward override ───────────────────────────────────────────
+    # Only two outcomes: WIN or LOSS.
+    # Timeout always produces a winner by ship count; mutual elimination → LOSS.
+    t_win, t_loss = TERMINAL_WIN, TERMINAL_LOSS
+
     rewards = [float(_read(s, "reward", 0) or 0) for s in states]
     max_r   = max(rewards)
     winner  = -1 if max_r <= 0 else rewards.index(max_r)
 
     if buf.rewards:
         if n == 2:
-            # 1v1: simple win/loss/draw
             if winner == 0:
-                term = TERMINAL_WIN
-            elif winner < 0:
-                term = TERMINAL_DRAW
+                term    = t_win
+                outcome = "WIN"
             else:
-                term = TERMINAL_LOSS
-            outcome = "WIN" if winner == 0 else ("DRAW" if winner < 0 else "LOSS")
+                # winner < 0 = mutual elimination, or opponent won — both are LOSS
+                term    = t_loss
+                outcome = "LOSS"
         else:
-            # 4v4: placement-based reward (2nd ≠ 4th)
+            # 4v4: placement-based reward
             if max_r <= 0:
-                term    = TERMINAL_DRAW
-                outcome = "DRAW"
+                term    = t_loss
+                outcome = "LOSS"
             else:
                 sorted_players = sorted(range(len(rewards)), key=lambda i: -rewards[i])
-                our_placement  = sorted_players.index(0) + 1   # 1-indexed rank
-                term    = PLACEMENT_REWARD.get(our_placement, TERMINAL_LOSS)
-                outcome = ("WIN" if our_placement == 1
-                           else "DRAW" if our_placement == 2
-                           else "LOSS")
+                our_placement  = sorted_players.index(0) + 1
+                term    = PLACEMENT_REWARD.get(our_placement, t_loss)
+                outcome = "WIN" if our_placement == 1 else "LOSS"
 
         buf.terminal_bonus = term
-        buf.rewards[-1]    = term   # override last step — game over
+        buf.rewards[-1]    = term
         buf.dones[-1]      = True
 
-        # Only wins keep event/momentum credit.
-        # Draws and losses are both zeroed — agent has one path to positive reward: win.
-        if outcome in ("LOSS", "DRAW"):
-            for i in range(len(buf.rewards) - 1):
-                buf.rewards[i] = 0.0
-            buf.total_events   = 0.0
-            buf.total_momentum = 0.0
+        # Event/momentum rewards kept even on losses — agent needs signal
+        # from everywhere when facing hard enemies it cannot yet beat.
     else:
-        outcome = "DRAW"
+        # Empty buffer — agent fired no moves all game. Treat as LOSS.
+        buf.terminal_bonus = t_loss
+        outcome = "LOSS"
 
     return buf, outcome
 
@@ -836,12 +831,13 @@ def train(n_rounds:        int  = N_ROUNDS,
     critic = TransformerCritic().to(device)
 
     # ── Resume from transformer checkpoint if available ────────────────────
-    best_wr_ppo    = 0.0
-    start_rnd      = 1
-    ent_ramp_start = 1
-    avg_loss       = 0.0
-    avg_ent        = 0.0
-    is_fresh_start = True   # flipped to False if a checkpoint loads successfully
+    best_wr_ppo     = 0.0
+    start_rnd       = 1
+    ent_ramp_start  = 1
+    avg_loss        = 0.0
+    avg_ent         = 0.0
+    is_fresh_start  = True   # flipped to False if a checkpoint loads successfully
+    current_tier    = START_TIER
 
     for resume_path in [SAVE_PATH, BEST_PATH]:
         if resume_path.exists():
@@ -864,13 +860,21 @@ def train(n_rounds:        int  = N_ROUNDS,
                     '_ENT_RAMP_START_OVERRIDE', None)
                 if override is not None:
                     ent_ramp_start = override
-                is_fresh_start = False
+                is_fresh_start  = False
                 print(f"Resumed from {resume_path.name}  "
-                      f"(round {start_rnd-1}, best_wr_ppo={best_wr_ppo:.1%})")
+                      f"(round {start_rnd-1}, best_wr_ppo={best_wr_ppo:.1%}, tier={current_tier+1})")
                 print(f"  Critic: loaded from checkpoint — warm-up skipped.")
                 break
             except Exception as e:
                 print(f"  Could not resume from {resume_path.name}: {e}")
+
+    # ── Load cumulative per-enemy stats (persists across sessions) ────────────
+    enemy_stats: dict = {}
+    if ENEMY_STATS_PATH.exists():
+        try:
+            enemy_stats = json.loads(ENEMY_STATS_PATH.read_text())
+        except Exception:
+            enemy_stats = {}
 
     if is_fresh_start:
         print(f"  Critic: TransformerCritic — starts fresh.")
@@ -910,8 +914,8 @@ def train(n_rounds:        int  = N_ROUNDS,
         print(f"No enemy agents found in {ENEMY_DIR}"); return None
 
     # ── Curriculum pool setup ──────────────────────────────────────────────
-    def _build_pools(tier_labels_list, label):
-        """Build per-tier (label, fn) lists and active tier pools for one mode."""
+    def _build_tier_lists(tier_labels_list, label):
+        """Build per-tier (label, fn) lists."""
         tier_agents = []
         assigned = set()
         for tier_labels in tier_labels_list:
@@ -922,24 +926,36 @@ def train(n_rounds:        int  = N_ROUNDS,
         if leftover:
             tier_agents[-1].extend(leftover)
             print(f"  [{label}] {len(leftover)} untiered enemies added to Tier {len(tier_labels_list)}")
-        active = [tier_agents[t] for t in range(min(START_TIER + 1, len(tier_agents))) if tier_agents[t]]
-        flat   = [e for pool in active for e in pool]
-        return tier_agents, active, flat
+        return tier_agents
 
-    tier_agents_1v1, active_tier_pools_1v1, active_enemies_1v1 = _build_pools(CURRICULUM_TIERS_1V1, "1v1")
-    tier_agents_4v4, active_tier_pools_4v4, active_enemies_4v4 = _build_pools(CURRICULUM_TIERS_4V4, "4v4")
+    tier_agents_1v1 = _build_tier_lists(CURRICULUM_TIERS_1V1, "1v1")
+    tier_agents_4v4 = _build_tier_lists(CURRICULUM_TIERS_4V4, "4v4")
+    n_tiers = len(tier_agents_1v1)
+
+    # Active pools — pure or cumulative depending on START_TIER_PURE
+    if START_TIER_PURE:
+        # Only the exact START_TIER pool — no mixing with lower tiers
+        active_tier_pools_1v1 = [tier_agents_1v1[min(START_TIER, n_tiers - 1)]]
+        active_tier_pools_4v4 = [tier_agents_4v4[min(START_TIER, n_tiers - 1)]]
+    else:
+        # Cumulative: tiers 0 through START_TIER all cycle
+        active_tier_pools_1v1 = [tier_agents_1v1[t] for t in range(min(START_TIER + 1, n_tiers)) if tier_agents_1v1[t]]
+        active_tier_pools_4v4 = [tier_agents_4v4[t] for t in range(min(START_TIER + 1, n_tiers)) if tier_agents_4v4[t]]
 
     print("\n  1v1 curriculum:")
     for t, tier in enumerate(tier_agents_1v1):
-        status = "ACTIVE" if t <= START_TIER else "locked"
+        if START_TIER_PURE:
+            status = "ACTIVE" if t == START_TIER else "idle"
+        else:
+            status = "ACTIVE" if t <= START_TIER else "locked"
         print(f"    Tier {t+1} [{status}]: {[lbl for lbl, _ in tier]}")
-    print(f"    Active: {len(active_enemies_1v1)} enemies across {len(active_tier_pools_1v1)} tier(s)")
+    mode_str = f"pure Tier {START_TIER+1}" if START_TIER_PURE else f"Tier 1-{START_TIER+1} mixed"
+    print(f"    Mode: {mode_str}  ({sum(len(p) for p in active_tier_pools_1v1)} enemies)")
 
     print(f"  4v4 curriculum: {'DISABLED (FORCE_1V1=True)' if FORCE_1V1 else 'enabled'}")
     for t, tier in enumerate(tier_agents_4v4):
-        status = ("ready" if t <= START_TIER else "locked") if not FORCE_1V1 else "idle"
+        status = ("ACTIVE" if t <= START_TIER else "locked") if not FORCE_1V1 else "idle"
         print(f"    Tier {t+1} [{status}]: {[lbl for lbl, _ in tier]}")
-    print(f"    Pool built: {len(active_enemies_4v4)} enemies — not used while FORCE_1V1=True")
 
     n_actor  = sum(p.numel() for p in actor.parameters()  if p.requires_grad)
     n_critic = sum(p.numel() for p in critic.parameters() if p.requires_grad)
@@ -949,36 +965,45 @@ def train(n_rounds:        int  = N_ROUNDS,
     print(f"  LR actor={LR_ACTOR}  LR critic={LR_CRITIC}")
     print(f"  ENT_COEF {ENT_COEF_START:.3f}→{ENT_COEF_END:.3f} over {ENT_COEF_RAMP} rounds  CLIP_EPS={CLIP_EPS}")
     print(f"  Critic warm-up: first {CRITIC_WARMUP_ROUNDS} rounds actor is frozen")
-    print(f"  FORCE_1V1={FORCE_1V1}  Terminal win/loss={TERMINAL_WIN}/{TERMINAL_LOSS}")
+    print(f"  FORCE_1V1={FORCE_1V1}  Terminal win={TERMINAL_WIN}  loss={TERMINAL_LOSS}")
     print("=" * 60)
 
     no_improve = 0
 
     for rnd in range(start_rnd, start_rnd + n_rounds):
-        wins = losses = draws = 0
+        wins = losses = 0
         all_bufs: list = []
-
-        g_1v1 = g_4v4 = 0   # separate counters for balanced tier interleaving per mode
+        round_enemy_breakdown: dict = {}   # label -> {'w': 0, 'l': 0}
+        g_1v1 = g_4v4 = 0
 
         for g in range(games_per_round):
             if FORCE_1V1:
-                mode_tag = "1v1"
-                pool = active_tier_pools_1v1[g_1v1 % len(active_tier_pools_1v1)] if active_tier_pools_1v1 else active_enemies_1v1
-                g_1v1 += 1
-                filler = random.choice(pool)
-                fns    = [None, filler[1]]
+                mode_tag    = "1v1"
+                tier_idx    = g_1v1 % len(active_tier_pools_1v1)
+                pool        = active_tier_pools_1v1[tier_idx]
+                g_1v1      += 1
+                filler      = random.choice(pool)
+                enemy_label = filler[0]
+                fns         = [None, filler[1]]
+
             elif g % 2 == 0:
-                mode_tag = "1v1"
-                pool = active_tier_pools_1v1[g_1v1 % len(active_tier_pools_1v1)] if active_tier_pools_1v1 else active_enemies_1v1
-                g_1v1 += 1
-                filler = random.choice(pool)
-                fns    = [None, filler[1]]
+                mode_tag    = "1v1"
+                tier_idx    = g_1v1 % len(active_tier_pools_1v1)
+                pool        = active_tier_pools_1v1[tier_idx]
+                g_1v1      += 1
+                filler      = random.choice(pool)
+                enemy_label = filler[0]
+                fns         = [None, filler[1]]
+
             else:
-                mode_tag = "4p"
-                pool = active_tier_pools_4v4[g_4v4 % len(active_tier_pools_4v4)] if active_tier_pools_4v4 else active_enemies_4v4
-                g_4v4 += 1
-                fillers = random.choices(pool, k=min(3, len(pool)))
-                fns     = [None] + [fn for _, fn in fillers]
+                mode_tag    = "4p"
+                tier_idx    = g_4v4 % len(active_tier_pools_4v4)
+                pool        = active_tier_pools_4v4[tier_idx]
+                g_4v4      += 1
+                fillers     = random.choices(pool, k=min(3, len(pool)))
+                enemy_label = "+".join(lbl for lbl, _ in fillers)
+                fns         = [None] + [fn for _, fn in fillers]
+
 
             seed = 42 + rnd * 1000 + g
 
@@ -991,13 +1016,19 @@ def train(n_rounds:        int  = N_ROUNDS,
                 import traceback; traceback.print_exc()
                 continue
 
-            if   outcome == "WIN":  wins   += 1
-            elif outcome == "LOSS": losses += 1
-            else:                   draws  += 1
+            # per-enemy tracking
+            if enemy_label not in round_enemy_breakdown:
+                round_enemy_breakdown[enemy_label] = {'w': 0, 'l': 0}
+            if outcome == "WIN":
+                round_enemy_breakdown[enemy_label]['w'] += 1
+                wins   += 1
+            else:
+                round_enemy_breakdown[enemy_label]['l'] += 1
+                losses += 1
 
             sys.stdout.write(
                 f"\r  Round {rnd}  game {g+1}/{games_per_round}"
-                f" [{mode_tag}]  W:{wins} L:{losses} D:{draws}  "
+                f" [{mode_tag}]  W:{wins} L:{losses}  "
             )
             sys.stdout.flush()
 
@@ -1020,6 +1051,7 @@ def train(n_rounds:        int  = N_ROUNDS,
             avg_kl = 0.0
             stats = {"clipfrac": 0.0}
         wr = wins / max(1, games_per_round)
+
         tag = ""
         event_sum  = sum(getattr(b, "total_events",   0.0) for b in all_bufs)
         mom_sum    = sum(getattr(b, "total_momentum", 0.0) for b in all_bufs)
@@ -1027,26 +1059,38 @@ def train(n_rounds:        int  = N_ROUNDS,
         shaped_sum = event_sum + mom_sum
         clipfrac   = stats.get('clipfrac', 0.0)
 
+        # ── Update cumulative per-enemy stats ─────────────────────────────
+        for label, res in round_enemy_breakdown.items():
+            if label not in enemy_stats:
+                enemy_stats[label] = {'wins': 0, 'losses': 0, 'games': 0, 'wr': 0.0}
+            enemy_stats[label]['wins']   += res['w']
+            enemy_stats[label]['losses'] += res['l']
+            enemy_stats[label]['games']  += res['w'] + res['l']
+            g_tot = enemy_stats[label]['games']
+            enemy_stats[label]['wr'] = round(enemy_stats[label]['wins'] / g_tot, 4) if g_tot else 0.0
+
         # ── Record history and save curves ────────────────────────────────
         history.append({
-            'round':        rnd,
-            'wr':           wr,
-            'wins':         wins,
-            'losses':       losses,
-            'draws':        draws,
-            'loss':         avg_loss,
-            'entropy':      avg_ent,
-            'kl':           avg_kl,
-            'clipfrac':     clipfrac,
-            'ent_coef':     ent_coef_val,
-            'events':       event_sum,
-            'momentum':     mom_sum,
-            'terminal':     term_sum,
-            'total_reward': shaped_sum + term_sum,
-            'freeze_actor': freeze_actor,
+            'round':            rnd,
+            'wr':               wr,
+            'wins':             wins,
+            'losses':           losses,
+            'tier':             current_tier,
+            'loss':             avg_loss,
+            'entropy':          avg_ent,
+            'kl':               avg_kl,
+            'clipfrac':         clipfrac,
+            'ent_coef':         ent_coef_val,
+            'events':           event_sum,
+            'momentum':         mom_sum,
+            'terminal':         term_sum,
+            'total_reward':     shaped_sum + term_sum,
+            'freeze_actor':     freeze_actor,
+            'enemy_breakdown':  round_enemy_breakdown,
         })
         try:
             HISTORY_PATH.write_text(json.dumps(history, indent=2))
+            ENEMY_STATS_PATH.write_text(json.dumps(enemy_stats, indent=2))
             _save_curves(history, CURVES_PATH)
         except Exception as _e:
             print(f"  [warn] could not save history/curves: {_e}")
@@ -1071,21 +1115,17 @@ def train(n_rounds:        int  = N_ROUNDS,
         if SELFPLAY_ENABLED and rnd % SELFPLAY_SNAPSHOT_EVERY == 0:
             snap_fn    = create_snapshot_agent(actor, device)
             snap_label = f'self_r{rnd}'
-            # Add snapshot to both mode pools (last active tier in each)
-            active_tier_pools_1v1[-1].append((snap_label, snap_fn))
-            active_tier_pools_4v4[-1].append((snap_label, snap_fn))
-            active_enemies_1v1.append((snap_label, snap_fn))
-            active_enemies_4v4.append((snap_label, snap_fn))
+            # Add snapshot to the hardest tier pool in each mode
+            tier_agents_1v1[-1].append((snap_label, snap_fn))
+            tier_agents_4v4[-1].append((snap_label, snap_fn))
             # Drop oldest snapshot if over limit
-            self_snaps_1v1 = [(l, f) for l, f in active_enemies_1v1 if l.startswith('self_')]
-            if len(self_snaps_1v1) > SELFPLAY_MAX_SNAPSHOTS:
-                oldest = self_snaps_1v1[0][0]
-                active_tier_pools_1v1[-1] = [(l, f) for l, f in active_tier_pools_1v1[-1] if l != oldest]
-                active_tier_pools_4v4[-1] = [(l, f) for l, f in active_tier_pools_4v4[-1] if l != oldest]
-                active_enemies_1v1[:] = [(l, f) for l, f in active_enemies_1v1 if l != oldest]
-                active_enemies_4v4[:] = [(l, f) for l, f in active_enemies_4v4 if l != oldest]
+            self_snaps = [(l, f) for l, f in tier_agents_1v1[-1] if l.startswith('self_')]
+            if len(self_snaps) > SELFPLAY_MAX_SNAPSHOTS:
+                oldest = self_snaps[0][0]
+                tier_agents_1v1[-1] = [(l, f) for l, f in tier_agents_1v1[-1] if l != oldest]
+                tier_agents_4v4[-1] = [(l, f) for l, f in tier_agents_4v4[-1] if l != oldest]
                 print(f"\n  Self-play: dropped {oldest}, kept {SELFPLAY_MAX_SNAPSHOTS} snapshots")
-            n_snaps = len([l for l, _ in active_enemies_1v1 if l.startswith('self_')])
+            n_snaps = len([l for l, _ in tier_agents_1v1[-1] if l.startswith('self_')])
             print(f"\n  Self-play snapshot saved: {snap_label}  "
                   f"({n_snaps} snapshots in pool)")
 
@@ -1108,7 +1148,7 @@ def train(n_rounds:        int  = N_ROUNDS,
               f"kl={avg_kl:.4f}  clip={clipfrac:.3f}  ent_coef={ent_coef_val:.4f}"
               f"\n     reward:  events={event_sum:+.2f}  momentum={mom_sum:+.2f}  "
               f"terminal={term_sum:+.2f}  total={shaped_sum + term_sum:+.2f}"
-              f"  tier={START_TIER+1}/{len(CURRICULUM_TIERS_1V1)}"
+              f"  tier={current_tier+1}/{n_tiers}"
               f"{warmup_str}{tag}")
 
     print(f"\nDone. Best PPO WR={best_wr_ppo:.1%}")

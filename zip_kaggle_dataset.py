@@ -253,6 +253,7 @@ def build_rl_zip(out_path: Path):
         (ROOT / "rl" / "transformer_last.pt",      "transformer_last.pt"),
         (ROOT / "rl" / "transformer_best.pt",      "transformer_best.pt"),
         (ROOT / "rl" / "transformer_history.json", "transformer_history.json"),
+        (ROOT / "rl" / "enemy_stats.json",         "enemy_stats.json"),
         (ROOT / "rl" / "ppo_training.log",         "ppo_training.log"),
     ]
     found = [(src, arc) for src, arc in candidates if src.exists()]

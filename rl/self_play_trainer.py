@@ -354,7 +354,7 @@ def play_game_collect(model, agent_fns, seed: int = 0):
         buf.rewards[-1] = 1.0 if winner == 0 else 0.0
         buf.dones[-1]   = True
 
-    outcome = "WIN" if winner == 0 else ("DRAW" if winner < 0 else "LOSS")
+    outcome = "WIN" if winner == 0 else "LOSS"
     return buf, outcome
 
 
@@ -511,7 +511,7 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
     rnd = start_rnd - 1  # guard: defined even if loop body never executes
 
     for rnd in range(start_rnd, start_rnd + n_rounds):
-        wins = losses = draws = 0
+        wins = losses = 0
         round_loss = 0.0
         round_entropy = 0.0
         intent_counts = [0] * len(INTENT_NAMES)
@@ -535,13 +535,14 @@ def train(n_rounds: int = N_ROUNDS, games_per_round: int = GAMES_PER_ROUND):
             round_entropy += entropy
             buf.clear()
 
-            if   outcome == "WIN":  wins   += 1
-            elif outcome == "LOSS": losses += 1
-            else:                   draws  += 1
+            if outcome == "WIN":
+                wins   += 1
+            else:
+                losses += 1
 
             sys.stdout.write(
                 f"\r  Round {rnd}/{n_rounds}  game {g+1}/{games_per_round}"
-                f"  W:{wins} L:{losses} D:{draws}"
+                f"  W:{wins} L:{losses}"
                 f"  ppo_loss={round_loss/(g+1):.4f}  "
             )
             sys.stdout.flush()
