@@ -103,9 +103,18 @@ MINI_BATCH      = 64
 ACTION_THRESHOLD = 0.35
 TOP_K_EDGES      = 5
 
-ENT_COEF_START = 0.02
-ENT_COEF_END   = 0.02   # constant — no decay for hard-tier training
-ENT_COEF_RAMP  = 40
+# Adaptive entropy temperature (SAC-style).
+# log_alpha is a learnable parameter updated every mini-batch.
+# If entropy < TARGET_ENTROPY: alpha increases -> stronger entropy push
+# If entropy > TARGET_ENTROPY: alpha decreases -> weaker entropy push
+# This is the ONLY mechanism that holds entropy under constant loss pressure.
+# A fixed ent_coef CANNOT win against the PPO gradient when all rewards are negative.
+TARGET_ENTROPY = 0.43   # nats -- centre of the 0.40-0.45 target band
+ALPHA_LR       = 3e-3   # fast adaptation to outpace massive PPO gradients during 100% loss
+ENT_COEF_START = 0.1    # start strong so PPO doesn't get a head start on collapsing
+# ENT_COEF_END and ENT_COEF_RAMP kept for backward compat with notebook prints
+ENT_COEF_END   = 0.013
+ENT_COEF_RAMP  = 20
 
 # Set True to reset entropy ramp at session start (good for tier changes).
 # Set False to continue entropy decay from where the last session left off
@@ -117,8 +126,13 @@ KL_STOP_MULT    = 1.5
 
 # Only two outcomes exist: WIN or LOSS.
 # Timeout always yields a winner by ship count; mutual elimination is LOSS.
-TERMINAL_WIN  =  8.0
-TERMINAL_LOSS = -8.0
+# WIN raised to +9 for stronger positive signal.
+# LOSS kept at -6 (softer than -8) so event rewards carry more relative weight.
+# Event rewards on LOSS are scaled x0.4 (see play_game_collect) to prevent
+# reward hacking: agent cannot farm planet captures on losses to cancel out
+# the terminal penalty. It gets 40% signal from events even on losses.
+TERMINAL_WIN  =  9.0
+TERMINAL_LOSS = -6.0
 
 FORCE_1V1 = True
 
@@ -651,8 +665,16 @@ def play_game_collect(actor: EdgeTransformerNet,
         buf.rewards[-1]    = term
         buf.dones[-1]      = True
 
-        # Event/momentum rewards kept even on losses — agent needs signal
-        # from everywhere when facing hard enemies it cannot yet beat.
+        # On LOSS: scale intermediate event/momentum rewards down to 0.4.
+        # This prevents the agent from reward-hacking -- it cannot accumulate
+        # enough positive event reward on a loss to mask the terminal penalty.
+        # 40% is kept so there is still a learning signal for planet-capture
+        # strategy even on games the agent cannot yet win.
+        if outcome == "LOSS" and len(buf.rewards) > 1:
+            for i in range(len(buf.rewards) - 1):   # skip terminal (last step)
+                buf.rewards[i] *= 0.4
+            buf.total_events   *= 0.4
+            buf.total_momentum *= 0.4
     else:
         # Empty buffer — agent fired no moves all game. Treat as LOSS.
         buf.terminal_bonus = t_loss
@@ -671,15 +693,20 @@ def ppo_update(actor: EdgeTransformerNet,
                bufs: list,
                device: str,
                freeze_actor: bool = False,
-               ent_coef: float = ENT_COEF_END):
+               ent_coef: float = ENT_COEF_END,
+               log_alpha: nn.Parameter = None,
+               alpha_optimizer=None):
     """
-    PPO update with scheduled entropy coefficient (ent_coef).
+    PPO update with adaptive SAC-style entropy temperature.
+
+    log_alpha is a learnable nn.Parameter. Each mini-batch:
+      - actor loss uses alpha = exp(log_alpha).detach() (no grad through alpha)
+      - alpha is then updated separately: push entropy toward TARGET_ENTROPY
+    If log_alpha is None, falls back to fixed ent_coef (legacy).
 
     freeze_actor=True: only the critic is updated (warm-up phase).
-      The actor forward still runs (for log-probs), but its gradients
-      are not applied.
     """
-    _empty = {"loss": 0.0, "entropy": 0.0, "kl": 0.0, "clipfrac": 0.0, "vloss": 0.0}
+    _empty = {"loss": 0.0, "entropy": 0.0, "kl": 0.0, "clipfrac": 0.0, "vloss": 0.0, "alpha": ent_coef}
     if not bufs:
         return _empty
 
@@ -711,7 +738,7 @@ def ppo_update(actor: EdgeTransformerNet,
     adv_all = torch.FloatTensor(all_adv).to(device)
     adv_all = (adv_all - adv_all.mean()) / (adv_all.std() + 1e-8)
 
-    total_loss = total_ent = total_kl = total_clip = total_vloss = 0.0
+    total_loss = total_ent = total_kl = total_clip = total_vloss = total_alpha = 0.0
     n_updates = 0
 
     actor.train()
@@ -735,7 +762,7 @@ def ppo_update(actor: EdgeTransformerNet,
                 exec_idxs = torch.tensor(all_exec[b], dtype=torch.long, device=device)
                 new_log_ps.append(F.logsigmoid(logits[exec_idxs]).mean())
 
-                # Bernoulli entropy over ALL candidate edges — reflects full policy uncertainty
+                # Bernoulli entropy over ALL candidate edges
                 probs = torch.sigmoid(logits)
                 ent   = -(probs * (probs + 1e-8).log()
                           + (1 - probs) * (1 - probs + 1e-8).log()).mean()
@@ -754,6 +781,9 @@ def ppo_update(actor: EdgeTransformerNet,
                 (v_clipped - returns[batch]).pow(2),
             ).mean()
 
+            # Current alpha: adaptive if log_alpha provided, else fixed
+            alpha_cur = log_alpha.exp().detach() if log_alpha is not None else ent_coef
+
             if freeze_actor:
                 loss = VAL_COEF * L_val
                 ratio = torch.ones_like(new_lp)
@@ -764,7 +794,11 @@ def ppo_update(actor: EdgeTransformerNet,
                     ratio * adv_b,
                     torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * adv_b,
                 ).mean()
-                loss = -L_clip + VAL_COEF * L_val - ent_coef * entropy
+                
+                # Hard floor: absolutely prevent entropy from diving below 0.40
+                ent_floor_penalty = 5.0 * F.relu(0.40 - entropy)
+                
+                loss = -L_clip + VAL_COEF * L_val - alpha_cur * entropy + ent_floor_penalty
 
             with torch.no_grad():
                 approx_kl = ((ratio - 1) - torch.log(ratio.clamp(min=1e-8))).mean()
@@ -779,12 +813,22 @@ def ppo_update(actor: EdgeTransformerNet,
             nn.utils.clip_grad_norm_(grad_params, 0.5)
             optimizer.step()
 
-            total_loss += loss.item()
-            total_ent += entropy.item()
-            total_kl += approx_kl.item()
-            total_clip += clipfrac.item()
+            # ── Adaptive alpha update (SAC-style) ──────────────────────────
+            # Separate from actor/critic update so alpha doesn't contaminate
+            # the policy gradient. Only update when actor is not frozen.
+            if log_alpha is not None and alpha_optimizer is not None and not freeze_actor:
+                alpha_loss = log_alpha * (entropy.detach() - TARGET_ENTROPY)
+                alpha_optimizer.zero_grad()
+                alpha_loss.backward()
+                alpha_optimizer.step()
+
+            total_loss  += loss.item()
+            total_ent   += entropy.item()
+            total_kl    += approx_kl.item()
+            total_clip  += clipfrac.item()
             total_vloss += L_val.item()
-            n_updates += 1
+            total_alpha += float(log_alpha.exp().item() if log_alpha is not None else ent_coef)
+            n_updates   += 1
 
             if not freeze_actor and approx_kl.item() > TARGET_KL * KL_STOP_MULT:
                 stop_epoch = True
@@ -795,11 +839,12 @@ def ppo_update(actor: EdgeTransformerNet,
 
     n = max(1, n_updates)
     return {
-        "loss": total_loss / n,
-        "entropy": total_ent / n,
-        "kl": total_kl / n,
-        "clipfrac": total_clip / n,
-        "vloss": total_vloss / n,
+        "loss":     total_loss  / n,
+        "entropy":  total_ent   / n,
+        "kl":       total_kl    / n,
+        "clipfrac": total_clip  / n,
+        "vloss":    total_vloss / n,
+        "alpha":    total_alpha / n,   # actual adaptive alpha used this round
     }
 
 
@@ -894,6 +939,29 @@ def train(n_rounds:        int  = N_ROUNDS,
         {"params": actor.parameters(),  "lr": LR_ACTOR},
         {"params": critic.parameters(), "lr": LR_CRITIC},
     ], weight_decay=1e-4)
+
+    # ── Adaptive entropy temperature (SAC-style) ───────────────────────────
+    # log_alpha starts at log(ENT_COEF_START) and adapts every mini-batch
+    # to keep entropy at TARGET_ENTROPY. This is the ONLY reliable way to
+    # hold entropy when the agent is losing every game.
+    log_alpha = nn.Parameter(
+        torch.tensor(math.log(ENT_COEF_START), dtype=torch.float32).to(device)
+    )
+    alpha_optimizer = optim.Adam([log_alpha], lr=ALPHA_LR)
+
+    # Resume log_alpha from checkpoint if available
+    for _ckpt_check in [SAVE_PATH, BEST_PATH]:
+        if _ckpt_check.exists():
+            try:
+                _c = torch.load(_ckpt_check, map_location=device, weights_only=False)
+                if 'log_alpha' in _c and not RESET_ENT_ON_RESUME:
+                    log_alpha.data.fill_(_c['log_alpha'])
+                    print(f"  Restored log_alpha={log_alpha.exp().item():.4f} from checkpoint")
+                else:
+                    print(f"  log_alpha initialised at alpha={log_alpha.exp().item():.4f}  (fresh / reset)")
+            except Exception:
+                pass
+            break
 
     # ── Load enemy agents ──────────────────────────────────────────────────
     _std_paths = glob.glob(str(ENEMY_DIR / "*" / "main.py"))
@@ -1036,19 +1104,23 @@ def train(n_rounds:        int  = N_ROUNDS,
         # Warm-up only on a fresh start (no prior checkpoint).
         # When resuming, the critic is already calibrated — skip immediately.
         freeze_actor  = is_fresh_start and ((rnd - 1) < CRITIC_WARMUP_ROUNDS)
-        ent_coef_val  = _ent_coef(rnd, ent_ramp_start)
+        ent_coef_val  = _ent_coef(rnd, ent_ramp_start)   # kept for fallback only
         stats = ppo_update(
             actor, critic, optimizer,
             all_bufs, device,
             freeze_actor=freeze_actor,
-            ent_coef=ent_coef_val)
+            ent_coef=ent_coef_val,
+            log_alpha=log_alpha,
+            alpha_optimizer=alpha_optimizer)
         if isinstance(stats, dict):
             avg_loss = stats["loss"]
-            avg_ent = stats["entropy"]
-            avg_kl = stats["kl"]
+            avg_ent  = stats["entropy"]
+            avg_kl   = stats["kl"]
+            cur_alpha = stats.get("alpha", ent_coef_val)
         else:
             avg_loss, avg_ent = stats
-            avg_kl = 0.0
+            avg_kl    = 0.0
+            cur_alpha = ent_coef_val
             stats = {"clipfrac": 0.0}
         wr = wins / max(1, games_per_round)
 
@@ -1080,7 +1152,7 @@ def train(n_rounds:        int  = N_ROUNDS,
             'entropy':          avg_ent,
             'kl':               avg_kl,
             'clipfrac':         clipfrac,
-            'ent_coef':         ent_coef_val,
+            'ent_coef':         cur_alpha,   # actual adaptive alpha
             'events':           event_sum,
             'momentum':         mom_sum,
             'terminal':         term_sum,
@@ -1099,15 +1171,16 @@ def train(n_rounds:        int  = N_ROUNDS,
             buf.clear()
 
         ckpt = {
-            "epoch": rnd,
+            "epoch":          rnd,
             "ent_ramp_start": ent_ramp_start,
-            "best_wr": best_wr_ppo,
-            "best_wr_ppo": best_wr_ppo,
-            "loss": avg_loss,
-            "entropy": avg_ent,
-            "kl": avg_kl,
-            "actor": actor.state_dict(),
-            "critic": critic.state_dict(),
+            "best_wr":        best_wr_ppo,
+            "best_wr_ppo":    best_wr_ppo,
+            "loss":           avg_loss,
+            "entropy":        avg_ent,
+            "kl":             avg_kl,
+            "log_alpha":      log_alpha.item(),   # save adaptive alpha
+            "actor":          actor.state_dict(),
+            "critic":         critic.state_dict(),
         }
         torch.save(ckpt, SAVE_PATH)
 
@@ -1145,7 +1218,7 @@ def train(n_rounds:        int  = N_ROUNDS,
 
         warmup_str = "  [critic warmup — actor frozen]" if freeze_actor else ""
         print(f"\n  -> WR={wr:.1%}  loss={avg_loss:.4f}  ent={avg_ent:.4f}  "
-              f"kl={avg_kl:.4f}  clip={clipfrac:.3f}  ent_coef={ent_coef_val:.4f}"
+              f"kl={avg_kl:.4f}  clip={clipfrac:.3f}  alpha={cur_alpha:.4f} [target={TARGET_ENTROPY:.2f}]"
               f"\n     reward:  events={event_sum:+.2f}  momentum={mom_sum:+.2f}  "
               f"terminal={term_sum:+.2f}  total={shaped_sum + term_sum:+.2f}"
               f"  tier={current_tier+1}/{n_tiers}"
