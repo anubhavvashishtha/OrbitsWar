@@ -110,7 +110,7 @@ TOP_K_EDGES      = 5
 # This is the ONLY mechanism that holds entropy under constant loss pressure.
 # A fixed ent_coef CANNOT win against the PPO gradient when all rewards are negative.
 TARGET_ENTROPY = 0.43   # nats -- centre of the 0.40-0.45 target band
-ALPHA_LR       = 3e-3   # fast adaptation to outpace massive PPO gradients during 100% loss
+ALPHA_LR       = 0.05   # extremely fast adaptation (0.05) needed because PPO updates are rare
 ENT_COEF_START = 0.1    # start strong so PPO doesn't get a head start on collapsing
 # ENT_COEF_END and ENT_COEF_RAMP kept for backward compat with notebook prints
 ENT_COEF_END   = 0.013
@@ -1038,6 +1038,22 @@ def train(n_rounds:        int  = N_ROUNDS,
 
     no_improve = 0
 
+    def _sample_enemy(pool, enemy_stats: dict):
+        """
+        Sample enemy inversely proportional to win rate against them.
+        Enemies we beat less often get more training games.
+        Falls back to uniform if no stats yet.
+        """
+        labels = [lbl for lbl, _ in pool]
+        weights = []
+        for lbl in labels:
+            wr = enemy_stats.get(lbl, {}).get('wr', 0.5)  # default 50% if no data
+            weights.append(1.0 - wr + 0.1)  # +0.1 floor so no enemy gets zero weight
+        
+        total = sum(weights)
+        probs = [w / total for w in weights]
+        return random.choices(pool, weights=probs, k=1)[0], probs
+
     for rnd in range(start_rnd, start_rnd + n_rounds):
         wins = losses = 0
         all_bufs: list = []
@@ -1050,7 +1066,7 @@ def train(n_rounds:        int  = N_ROUNDS,
                 tier_idx    = g_1v1 % len(active_tier_pools_1v1)
                 pool        = active_tier_pools_1v1[tier_idx]
                 g_1v1      += 1
-                filler      = random.choice(pool)
+                filler, _   = _sample_enemy(pool, enemy_stats)
                 enemy_label = filler[0]
                 fns         = [None, filler[1]]
 
@@ -1059,7 +1075,7 @@ def train(n_rounds:        int  = N_ROUNDS,
                 tier_idx    = g_1v1 % len(active_tier_pools_1v1)
                 pool        = active_tier_pools_1v1[tier_idx]
                 g_1v1      += 1
-                filler      = random.choice(pool)
+                filler, _   = _sample_enemy(pool, enemy_stats)
                 enemy_label = filler[0]
                 fns         = [None, filler[1]]
 
@@ -1068,7 +1084,8 @@ def train(n_rounds:        int  = N_ROUNDS,
                 tier_idx    = g_4v4 % len(active_tier_pools_4v4)
                 pool        = active_tier_pools_4v4[tier_idx]
                 g_4v4      += 1
-                fillers     = random.choices(pool, k=min(3, len(pool)))
+                _, probs    = _sample_enemy(pool, enemy_stats)  # get PFSP weights
+                fillers     = random.choices(pool, weights=probs, k=min(3, len(pool)))
                 enemy_label = "+".join(lbl for lbl, _ in fillers)
                 fns         = [None] + [fn for _, fn in fillers]
 
