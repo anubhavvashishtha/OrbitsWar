@@ -1,20 +1,20 @@
 {
   "main_5": {
-    "wins": 0,
-    "losses": 139,
-    "games": 139,
-    "wr": 0.0
+    "wins": 4,
+    "losses": 1169,
+    "games": 1173,
+    "wr": 0.0034
   },
   "sigmaborov-starter": {
-    "wins": 18,
-    "losses": 153,
-    "games": 171,
-    "wr": 0.1053
+    "wins": 143,
+    "losses": 965,
+    "games": 1108,
+    "wr": 0.1291
   },
   "main_4": {
-    "wins": 0,
-    "losses": 170,
-    "games": 170,
-    "wr": 0.0
+    "wins": 3,
+    "losses": 1204,
+    "games": 1207,
+    "wr": 0.0025
   }
 }
