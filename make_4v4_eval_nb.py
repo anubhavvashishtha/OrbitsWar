@@ -104,16 +104,37 @@ combs = list(itertools.combinations(enemy_names, 3))
 print(f"Total unique 3-enemy combinations: {len(combs)}")
 
 import csv
+import os
 results = []
 GAMES_PER_COMB = 5
 
-csv_file = open('4v4_results.csv', 'w', newline='')
+already_evaluated = set()
+if os.path.exists('4v4_results.csv'):
+    with open('4v4_results.csv', 'r') as f:
+        reader = csv.reader(f)
+        try:
+            next(reader) # skip header
+        except StopIteration:
+            pass
+        for row in reader:
+            if len(row) >= 3:
+                already_evaluated.add(tuple(sorted([row[0], row[1], row[2]])))
+
+print(f"Found {len(already_evaluated)} combinations already evaluated in CSV.")
+
+mode = 'a' if os.path.exists('4v4_results.csv') else 'w'
+csv_file = open('4v4_results.csv', mode, newline='')
 csv_writer = csv.writer(csv_file)
-csv_writer.writerow(['Enemy_1', 'Enemy_2', 'Enemy_3', 'Wins', 'Total_Games', 'Win_Rate'])
+if mode == 'w':
+    csv_writer.writerow(['Enemy_1', 'Enemy_2', 'Enemy_3', 'Wins', 'Total_Games', 'Win_Rate'])
 
 env = make('orbit_wars')
 
 for idx, comb in enumerate(combs):
+    if tuple(sorted(comb)) in already_evaluated:
+        print(f"[{idx+1}/{len(combs)}] Skipping {comb[0]} + {comb[1]} + {comb[2]} (already done)")
+        continue
+        
     wins = 0
     for g in range(GAMES_PER_COMB):
         # Build agents list: [my_agent, e1, e2, e3]

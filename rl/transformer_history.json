@@ -13651,5 +13651,91 @@
         "l": 3
       }
     }
+  },
+  {
+    "round": 408,
+    "wr": 0.5,
+    "wins": 16,
+    "losses": 16,
+    "tier": 1,
+    "loss": 0.7189220190048218,
+    "entropy": 0.3940329849720001,
+    "kl": 0.08000729978084564,
+    "clipfrac": 0.53125,
+    "ent_coef": 0.25455939769744873,
+    "events": 96.71399999999998,
+    "momentum": 0.5573109057086604,
+    "terminal": 48.0,
+    "total_reward": 145.27131090570865,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "yuriygreben-architect": {
+        "w": 5,
+        "l": 0
+      },
+      "main_4": {
+        "w": 0,
+        "l": 4
+      },
+      "tamrazov-starwars": {
+        "w": 6,
+        "l": 0
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 8
+      },
+      "main": {
+        "w": 5,
+        "l": 0
+      },
+      "main_5": {
+        "w": 0,
+        "l": 4
+      }
+    }
+  },
+  {
+    "round": 409,
+    "wr": 0.5,
+    "wins": 16,
+    "losses": 16,
+    "tier": 1,
+    "loss": 1.395801067352295,
+    "entropy": 0.33495479822158813,
+    "kl": 0.15102261304855347,
+    "clipfrac": 0.5,
+    "ent_coef": 0.2600909173488617,
+    "events": 104.562,
+    "momentum": 0.5424417115496356,
+    "terminal": 48.0,
+    "total_reward": 153.10444171154964,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "tamrazov-starwars": {
+        "w": 7,
+        "l": 0
+      },
+      "main_4": {
+        "w": 0,
+        "l": 5
+      },
+      "main": {
+        "w": 4,
+        "l": 0
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 6
+      },
+      "yuriygreben-architect": {
+        "w": 5,
+        "l": 0
+      },
+      "main_5": {
+        "w": 0,
+        "l": 5
+      }
+    }
   }
 ]
