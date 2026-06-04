@@ -119,7 +119,7 @@ ENT_COEF_RAMP  = 20
 # Set True to reset entropy ramp at session start (good for tier changes).
 # Set False to continue entropy decay from where the last session left off
 # (good for same-tier resumptions).
-RESET_ENT_ON_RESUME = True
+RESET_ENT_ON_RESUME = False
 
 TARGET_KL       = 0.02    # stop early if policy diverges — prevents collapse
 KL_STOP_MULT    = 1.5
@@ -145,28 +145,28 @@ CRITIC_WARMUP_ROUNDS = 20
 
 CURRICULUM_TIERS_1V1 = [
     # Tier 1 — easy   (agent WR 80-100% in eval)
-    ['main', 'tamrazov-starwars', 'yuriygreben-architect', 'pascal-orbitwork-v14'],
+    ['main', 'tamrazov-starwars'],
     # Tier 2 — medium (agent WR ~13% in eval)
     ['sigmaborov-starter', 'main_4', 'main_5'],
     # Tier 3 — hard   (agent WR 0% in eval — currently unbeatable)
     ['main_1', 'main_2', 'main_3', 'pilkwang-structured',
-     'regressor', 'sigmaborov-reinforce', 'ykhnkf-distance-prioritized', 'classifier_bot'],
+     'sigmaborov-reinforce', 'ykhnkf-distance-prioritized', 'classifier_bot'],
 ]
 
 CURRICULUM_TIERS_4V4 = [
     # Tier 1 — easy  (0 wins, worst avg rank in 4v4)
-    ['main_5', 'pascal-orbitwork-v14', 'tamrazov-starwars',
+    ['main_5', 'tamrazov-starwars',
      'sigmaborov-reinforce', 'main'],
     # Tier 2 — medium  (0–1 wins, mixed avg rank)
-    ['yuriygreben-architect', 'sigmaborov-starter',
-     'regressor', 'main_4', 'main_2'],
+    ['sigmaborov-starter',
+     'main_4', 'main_2'],
     # Tier 3 — hard  (1–3 wins, best avg rank)
     ['pilkwang-structured', 'classifier_bot',
      'main_3', 'ykhnkf-distance-prioritized', 'main_1'],
 ]
 
 START_TIER       = 1     # ← CHANGE THIS each session (0=easy, 1=medium, 2=hard)
-START_TIER_PURE  = True  # True = only the START_TIER pool, no lower tiers mixed in
+START_TIER_PURE  = False  # True = only the START_TIER pool, no lower tiers mixed in
                          # False = cumulative (START_TIER=1 gives Tier1+Tier2, etc.)
 
 # ── Self-play ───────────────────────────────────────────────────────────────
