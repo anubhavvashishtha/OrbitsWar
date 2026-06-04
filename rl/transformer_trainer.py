@@ -1067,7 +1067,7 @@ def train(n_rounds:        int  = N_ROUNDS,
                 pool        = active_tier_pools_1v1[tier_idx]
                 g_1v1      += 1
                 filler, _   = _sample_enemy(pool, enemy_stats)
-                enemy_label = filler[0]
+                enemy_labels = [filler[0]]
                 fns         = [None, filler[1]]
 
             elif g % 2 == 0:
@@ -1076,7 +1076,7 @@ def train(n_rounds:        int  = N_ROUNDS,
                 pool        = active_tier_pools_1v1[tier_idx]
                 g_1v1      += 1
                 filler, _   = _sample_enemy(pool, enemy_stats)
-                enemy_label = filler[0]
+                enemy_labels = [filler[0]]
                 fns         = [None, filler[1]]
 
             else:
@@ -1086,7 +1086,7 @@ def train(n_rounds:        int  = N_ROUNDS,
                 g_4v4      += 1
                 _, probs    = _sample_enemy(pool, enemy_stats)  # get PFSP weights
                 fillers     = random.choices(pool, weights=probs, k=min(3, len(pool)))
-                enemy_label = "+".join(lbl for lbl, _ in fillers)
+                enemy_labels = [lbl for lbl, _ in fillers]
                 fns         = [None] + [fn for _, fn in fillers]
 
 
@@ -1102,13 +1102,17 @@ def train(n_rounds:        int  = N_ROUNDS,
                 continue
 
             # per-enemy tracking
-            if enemy_label not in round_enemy_breakdown:
-                round_enemy_breakdown[enemy_label] = {'w': 0, 'l': 0}
+            for lbl in enemy_labels:
+                if lbl not in round_enemy_breakdown:
+                    round_enemy_breakdown[lbl] = {'w': 0, 'l': 0}
+                if outcome == "WIN":
+                    round_enemy_breakdown[lbl]['w'] += 1
+                else:
+                    round_enemy_breakdown[lbl]['l'] += 1
+
             if outcome == "WIN":
-                round_enemy_breakdown[enemy_label]['w'] += 1
                 wins   += 1
             else:
-                round_enemy_breakdown[enemy_label]['l'] += 1
                 losses += 1
 
             sys.stdout.write(
