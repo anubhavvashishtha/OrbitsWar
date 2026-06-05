@@ -1,20 +1,20 @@
 {
   "main_5": {
     "wins": 5,
-    "losses": 1534,
-    "games": 1539,
+    "losses": 1551,
+    "games": 1556,
     "wr": 0.0032
   },
   "sigmaborov-starter": {
-    "wins": 202,
-    "losses": 1269,
-    "games": 1471,
-    "wr": 0.1373
+    "wins": 203,
+    "losses": 1283,
+    "games": 1486,
+    "wr": 0.1366
   },
   "main_4": {
     "wins": 2,
-    "losses": 1634,
-    "games": 1636,
+    "losses": 1646,
+    "games": 1648,
     "wr": 0.0012
   },
   "pascal-orbitwork-v14": {
@@ -30,57 +30,57 @@
     "wr": 0.9824
   },
   "main": {
-    "wins": 1660,
+    "wins": 1679,
     "losses": 3,
-    "games": 1663,
+    "games": 1682,
     "wr": 0.9982
   },
   "tamrazov-starwars": {
-    "wins": 1840,
+    "wins": 1865,
     "losses": 28,
-    "games": 1868,
-    "wr": 0.985
+    "games": 1893,
+    "wr": 0.9852
   },
   "sigmaborov-reinforce": {
     "wins": 0,
-    "losses": 3,
-    "games": 3,
+    "losses": 10,
+    "games": 10,
     "wr": 0.0
   },
   "ykhnkf-distance-prioritized": {
     "wins": 0,
-    "losses": 3,
-    "games": 3,
+    "losses": 11,
+    "games": 11,
     "wr": 0.0
   },
   "pilkwang-structured": {
     "wins": 0,
-    "losses": 2,
-    "games": 2,
+    "losses": 6,
+    "games": 6,
     "wr": 0.0
   },
   "classifier_bot": {
     "wins": 0,
-    "losses": 3,
-    "games": 3,
+    "losses": 9,
+    "games": 9,
     "wr": 0.0
   },
   "main_1": {
     "wins": 0,
-    "losses": 3,
-    "games": 3,
+    "losses": 6,
+    "games": 6,
     "wr": 0.0
   },
   "main_3": {
     "wins": 0,
-    "losses": 3,
-    "games": 3,
+    "losses": 10,
+    "games": 10,
     "wr": 0.0
   },
   "main_2": {
     "wins": 0,
-    "losses": 3,
-    "games": 3,
+    "losses": 8,
+    "games": 8,
     "wr": 0.0
   }
 }
