@@ -410,7 +410,7 @@ def build_submission_zip(out_path: Path):
 
 
 
-def build_submission_ppo_zip(out_path: Path):
+def build_submission_ppo_zip(out_path: Path, ppo_filename: str = "transformer_best.pt"):
     """
     Competition submission with PPO-finetuned EdgeTransformerNet.
 
@@ -430,7 +430,7 @@ def build_submission_ppo_zip(out_path: Path):
         (ROOT / "main.py",                    "main.py"),
     ]
     ppo_candidates = [
-        (ROOT / "rl" / "transformer_best.pt", "checkpoints/transformer_best.pt"),
+        (ROOT / "rl" / ppo_filename, "checkpoints/transformer_best.pt"),
     ]
     ppo_found = [(src, arc) for src, arc in ppo_candidates if src.exists()]
 
@@ -541,10 +541,15 @@ Workflow
             built.append(("submission_imitation", p, "upload to competition"))
 
     if do_submission_ppo:
-        p = OUT_DIR / "submission_ppo.zip"
-        r = build_submission_ppo_zip(p)
-        if r:
-            built.append(("submission_ppo", p, "upload to competition (PPO)"))
+        p_best = OUT_DIR / "submission_ppo_best.zip"
+        r_best = build_submission_ppo_zip(p_best, "transformer_best.pt")
+        if r_best:
+            built.append(("submission_ppo_best", p_best, "upload to competition (PPO best)"))
+            
+        p_last = OUT_DIR / "submission_ppo_last.zip"
+        r_last = build_submission_ppo_zip(p_last, "transformer_last.pt")
+        if r_last:
+            built.append(("submission_ppo_last", p_last, "upload to competition (PPO last)"))
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n{'='*60}")

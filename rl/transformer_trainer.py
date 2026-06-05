@@ -110,7 +110,7 @@ TOP_K_EDGES      = 5
 # This is the ONLY mechanism that holds entropy under constant loss pressure.
 # A fixed ent_coef CANNOT win against the PPO gradient when all rewards are negative.
 TARGET_ENTROPY = 0.42   # raised slightly for Tier 3 exploration
-ALPHA_LR       = 0.10   # increased tension: adapts even faster to entropy drops
+ALPHA_LR       = 0.05   # stricter alpha tension: less reactive to pure tier 3 chaos
 ENT_COEF_START = 0.1    # start strong so PPO doesn't get a head start on collapsing
 # ENT_COEF_END and ENT_COEF_RAMP kept for backward compat with notebook prints
 ENT_COEF_END   = 0.013
@@ -166,7 +166,7 @@ CURRICULUM_TIERS_4V4 = [
 ]
 
 START_TIER       = 2     # ← CHANGE THIS each session (0=easy, 1=medium, 2=hard)
-START_TIER_PURE  = False  # True = only the START_TIER pool, no lower tiers mixed in
+START_TIER_PURE  = True   # True = only the START_TIER pool, no lower tiers mixed in
                          # False = cumulative (START_TIER=1 gives Tier1+Tier2, etc.)
 
 # ── Self-play ───────────────────────────────────────────────────────────────
