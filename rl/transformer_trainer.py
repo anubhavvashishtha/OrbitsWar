@@ -109,7 +109,7 @@ TOP_K_EDGES      = 5
 # If entropy > TARGET_ENTROPY: alpha decreases -> weaker entropy push
 # This is the ONLY mechanism that holds entropy under constant loss pressure.
 # A fixed ent_coef CANNOT win against the PPO gradient when all rewards are negative.
-TARGET_ENTROPY = 0.43   # nats -- centre of the 0.40-0.45 target band
+TARGET_ENTROPY = 0.35   # lowered to prevent alpha explosion
 ALPHA_LR       = 0.05   # extremely fast adaptation (0.05) needed because PPO updates are rare
 ENT_COEF_START = 0.1    # start strong so PPO doesn't get a head start on collapsing
 # ENT_COEF_END and ENT_COEF_RAMP kept for backward compat with notebook prints
@@ -821,6 +821,8 @@ def ppo_update(actor: EdgeTransformerNet,
                 alpha_optimizer.zero_grad()
                 alpha_loss.backward()
                 alpha_optimizer.step()
+                with torch.no_grad():
+                    log_alpha.clamp_(max=-0.693)  # max alpha = 0.5
 
             total_loss  += loss.item()
             total_ent   += entropy.item()
@@ -1223,7 +1225,7 @@ def train(n_rounds:        int  = N_ROUNDS,
             print(f"\n  Self-play snapshot saved: {snap_label}  "
                   f"({n_snaps} snapshots in pool)")
 
-        if not freeze_actor and wr > best_wr_ppo:
+        if not freeze_actor and wr >= best_wr_ppo:
             best_wr_ppo = wr
             no_improve = 0
             ckpt["best_wr"] = best_wr_ppo

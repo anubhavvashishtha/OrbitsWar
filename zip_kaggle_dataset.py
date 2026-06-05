@@ -130,7 +130,8 @@ def build_src_zip(out_path: Path):
 
         # ── Notebooks ─────────────────────────────────────────────────────────
         for nb_name in ["train_imitation_kaggle.ipynb",
-                        "train_transformer_ppo.ipynb"]:
+                        "train_transformer_ppo.ipynb",
+                        "check_enemy_4v4.ipynb"]:
             nb = ROOT / nb_name
             if nb.exists():
                 _add_file(zf, nb, nb_name, stats)
