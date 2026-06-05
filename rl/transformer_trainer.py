@@ -91,7 +91,7 @@ CURVES_PATH         = ROOT / "transformer_curves.png"
 ENEMY_STATS_PATH    = ROOT / "enemy_stats.json"
 
 # ── hyper-parameters ──────────────────────────────────────────────────────
-N_ROUNDS        = 30      # ← set to 30 for test run, increase after checking results
+N_ROUNDS        = 9999    # ← runs continuously until manually stopped
 GAMES_PER_ROUND = 32
 LR_ACTOR        = 5e-6    # tighter than before — prevents policy collapse
 LR_CRITIC       = 1e-4
@@ -1205,7 +1205,7 @@ def train(n_rounds:        int  = N_ROUNDS,
             "actor":          actor.state_dict(),
             "critic":         critic.state_dict(),
         }
-        torch.save(ckpt, SAVE_PATH)
+
 
         # ── Self-play snapshot ────────────────────────────────────────────────
         if SELFPLAY_ENABLED and rnd % SELFPLAY_SNAPSHOT_EVERY == 0:
@@ -1238,6 +1238,9 @@ def train(n_rounds:        int  = N_ROUNDS,
                 tag = f"  [warmup — best PPO stays {best_wr_ppo:.1%}]"
             else:
                 tag = f"  (no improve, best PPO={best_wr_ppo:.1%}, streak={no_improve})"
+        
+        # Save last.pt AFTER best_wr_ppo is updated in the dictionary!
+        torch.save(ckpt, SAVE_PATH)
 
         warmup_str = "  [critic warmup — actor frozen]" if freeze_actor else ""
         print(f"\n  -> WR={wr:.1%}  loss={avg_loss:.4f}  ent={avg_ent:.4f}  "
