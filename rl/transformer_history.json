@@ -17286,5 +17286,139 @@
         "l": 3
       }
     }
+  },
+  {
+    "round": 501,
+    "wr": 0.28125,
+    "wins": 9,
+    "losses": 23,
+    "tier": 2,
+    "loss": 2.3633475303649902,
+    "entropy": 0.4282605051994324,
+    "kl": 0.06110670417547226,
+    "clipfrac": 0.40625,
+    "ent_coef": 0.008171766065061092,
+    "events": 73.089,
+    "momentum": 0.4070494958560225,
+    "terminal": -57.0,
+    "total_reward": 16.496049495856028,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "tamrazov-starwars": {
+        "w": 4,
+        "l": 3
+      },
+      "main_4": {
+        "w": 0,
+        "l": 2
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 1
+      },
+      "main": {
+        "w": 4,
+        "l": 0
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 2
+      },
+      "sigmaborov-starter": {
+        "w": 1,
+        "l": 6
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 1
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 1
+      },
+      "main_5": {
+        "w": 0,
+        "l": 2
+      },
+      "main_1": {
+        "w": 0,
+        "l": 2
+      },
+      "main_3": {
+        "w": 0,
+        "l": 2
+      },
+      "main_2": {
+        "w": 0,
+        "l": 1
+      }
+    }
+  },
+  {
+    "round": 502,
+    "wr": 0.34375,
+    "wins": 11,
+    "losses": 21,
+    "tier": 2,
+    "loss": 1.2378888130187988,
+    "entropy": 0.47307223081588745,
+    "kl": 0.04433389753103256,
+    "clipfrac": 0.359375,
+    "ent_coef": 0.007514658849686384,
+    "events": 88.25399999999999,
+    "momentum": 0.44918728818089826,
+    "terminal": -27.0,
+    "total_reward": 61.703187288180885,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "main": {
+        "w": 5,
+        "l": 0
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 4
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 2
+      },
+      "tamrazov-starwars": {
+        "w": 6,
+        "l": 0
+      },
+      "main_4": {
+        "w": 0,
+        "l": 5
+      },
+      "main_3": {
+        "w": 0,
+        "l": 1
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 1
+      },
+      "main_5": {
+        "w": 0,
+        "l": 2
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 1
+      },
+      "main_1": {
+        "w": 0,
+        "l": 1
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 2
+      },
+      "main_2": {
+        "w": 0,
+        "l": 2
+      }
+    }
   }
 ]

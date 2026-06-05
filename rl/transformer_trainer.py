@@ -109,8 +109,8 @@ TOP_K_EDGES      = 5
 # If entropy > TARGET_ENTROPY: alpha decreases -> weaker entropy push
 # This is the ONLY mechanism that holds entropy under constant loss pressure.
 # A fixed ent_coef CANNOT win against the PPO gradient when all rewards are negative.
-TARGET_ENTROPY = 0.35   # lowered to prevent alpha explosion
-ALPHA_LR       = 0.05   # extremely fast adaptation (0.05) needed because PPO updates are rare
+TARGET_ENTROPY = 0.42   # raised slightly for Tier 3 exploration
+ALPHA_LR       = 0.10   # increased tension: adapts even faster to entropy drops
 ENT_COEF_START = 0.1    # start strong so PPO doesn't get a head start on collapsing
 # ENT_COEF_END and ENT_COEF_RAMP kept for backward compat with notebook prints
 ENT_COEF_END   = 0.013
