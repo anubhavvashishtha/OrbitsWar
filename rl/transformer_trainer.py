@@ -165,7 +165,7 @@ CURRICULUM_TIERS_4V4 = [
      'main_3', 'ykhnkf-distance-prioritized', 'main_1'],
 ]
 
-START_TIER       = 1     # ← CHANGE THIS each session (0=easy, 1=medium, 2=hard)
+START_TIER       = 2     # ← CHANGE THIS each session (0=easy, 1=medium, 2=hard)
 START_TIER_PURE  = False  # True = only the START_TIER pool, no lower tiers mixed in
                          # False = cumulative (START_TIER=1 gives Tier1+Tier2, etc.)
 

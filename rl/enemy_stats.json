@@ -1,21 +1,21 @@
 {
   "main_5": {
-    "wins": 4,
-    "losses": 1217,
-    "games": 1221,
+    "wins": 5,
+    "losses": 1530,
+    "games": 1535,
     "wr": 0.0033
   },
   "sigmaborov-starter": {
-    "wins": 164,
-    "losses": 1049,
-    "games": 1213,
-    "wr": 0.1352
+    "wins": 201,
+    "losses": 1259,
+    "games": 1460,
+    "wr": 0.1377
   },
   "main_4": {
-    "wins": 1,
-    "losses": 1309,
-    "games": 1310,
-    "wr": 0.0008
+    "wins": 2,
+    "losses": 1627,
+    "games": 1629,
+    "wr": 0.0012
   },
   "pascal-orbitwork-v14": {
     "wins": 334,
@@ -30,15 +30,15 @@
     "wr": 0.9824
   },
   "main": {
-    "wins": 1237,
+    "wins": 1651,
     "losses": 3,
-    "games": 1240,
-    "wr": 0.9976
+    "games": 1654,
+    "wr": 0.9982
   },
   "tamrazov-starwars": {
-    "wins": 1368,
-    "losses": 21,
-    "games": 1389,
-    "wr": 0.9849
+    "wins": 1830,
+    "losses": 25,
+    "games": 1855,
+    "wr": 0.9865
   }
 }
