@@ -109,8 +109,9 @@ TOP_K_EDGES      = 5
 # If entropy > TARGET_ENTROPY: alpha decreases -> weaker entropy push
 # This is the ONLY mechanism that holds entropy under constant loss pressure.
 # A fixed ent_coef CANNOT win against the PPO gradient when all rewards are negative.
-TARGET_ENTROPY = 0.42   # raised slightly for Tier 3 exploration
-ALPHA_LR       = 0.05   # stricter alpha tension: less reactive to pure tier 3 chaos
+TARGET_ENTROPIES = [0.35, 0.42, 0.45]  # Target entropy per tier: Tier 1 (easy), Tier 2 (medium), Tier 3 (hard)
+TARGET_ENTROPY   = 0.42                # Legacy fallback
+ALPHA_LR         = 0.05                # stricter alpha tension: less reactive to pure tier 3 chaos
 ENT_COEF_START = 0.1    # start strong so PPO doesn't get a head start on collapsing
 # ENT_COEF_END and ENT_COEF_RAMP kept for backward compat with notebook prints
 ENT_COEF_END   = 0.013
@@ -166,7 +167,7 @@ CURRICULUM_TIERS_4V4 = [
 ]
 
 START_TIER       = 2     # ← CHANGE THIS each session (0=easy, 1=medium, 2=hard)
-START_TIER_PURE  = True   # True = only the START_TIER pool, no lower tiers mixed in
+START_TIER_PURE  = False   # True = only the START_TIER pool, no lower tiers mixed in
                          # False = cumulative (START_TIER=1 gives Tier1+Tier2, etc.)
 
 # ── Self-play ───────────────────────────────────────────────────────────────
@@ -276,7 +277,23 @@ def _save_curves(history: list, path: Path):
 
     # ── Panel 1: Win rate ─────────────────────────────────────────────────
     ax = axes[0, 0]
-    ax.plot(rounds, wr, 'b-', linewidth=1.5, label='win rate')
+    ax.plot(rounds, wr, 'b-', linewidth=2.0, label='overall win rate')
+
+    # Extract per-tier win rates if they exist in history
+    rounds_t1 = [h['round'] for h in history if 'tier_wrs' in h]
+    t1_wr     = [h['tier_wrs'][0] for h in history if 'tier_wrs' in h]
+    rounds_t2 = [h['round'] for h in history if 'tier_wrs' in h]
+    t2_wr     = [h['tier_wrs'][1] for h in history if 'tier_wrs' in h]
+    rounds_t3 = [h['round'] for h in history if 'tier_wrs' in h]
+    t3_wr     = [h['tier_wrs'][2] for h in history if 'tier_wrs' in h]
+
+    if t1_wr:
+        ax.plot(rounds_t1, t1_wr, color='green', linestyle='--', alpha=0.6, linewidth=1.0, label='Tier 1 WR')
+    if t2_wr:
+        ax.plot(rounds_t2, t2_wr, color='orange', linestyle='--', alpha=0.6, linewidth=1.0, label='Tier 2 WR')
+    if t3_wr:
+        ax.plot(rounds_t3, t3_wr, color='red', linestyle='--', alpha=0.6, linewidth=1.0, label='Tier 3 WR')
+
     ax.axhline(0.5, color='gray', linestyle='--', linewidth=0.8, label='50 % baseline')
     # shade critic warmup region
     warmup_end = history[0]['round'] + CRITIC_WARMUP_ROUNDS
@@ -706,16 +723,21 @@ def ppo_update(actor: EdgeTransformerNet,
 
     freeze_actor=True: only the critic is updated (warm-up phase).
     """
-    _empty = {"loss": 0.0, "entropy": 0.0, "kl": 0.0, "clipfrac": 0.0, "vloss": 0.0, "alpha": ent_coef}
+    _empty = {
+        "loss": 0.0, "entropy": 0.0, "kl": 0.0, "clipfrac": 0.0, "vloss": 0.0,
+        "alpha": ent_coef, "alphas": [ent_coef] * 3, "entropies": [0.0] * 3
+    }
     if not bufs:
         return _empty
 
     all_tf, all_exec, all_oldp, all_oldv = [], [], [], []
     all_ret, all_adv = [], []
+    all_tiers = []
 
     for buf in bufs:
         if len(buf) < 2:
             continue
+        t_idx = getattr(buf, 'tier_idx', 1)  # Default to Tier 2 (medium) if not set
         rets, advs = buf.compute_gae(last_value=0.0)
         for tf, ei, op, ov, ret, adv in zip(
                 buf.turn_feats, buf.executed_idxs, buf.log_probs, buf.values,
@@ -726,6 +748,7 @@ def ppo_update(actor: EdgeTransformerNet,
             all_oldv.append(ov)
             all_ret.append(ret)
             all_adv.append(adv)
+            all_tiers.append(t_idx)
 
     if not all_tf:
         return _empty
@@ -737,8 +760,11 @@ def ppo_update(actor: EdgeTransformerNet,
     returns = torch.FloatTensor(all_ret).to(device)
     adv_all = torch.FloatTensor(all_adv).to(device)
     adv_all = (adv_all - adv_all.mean()) / (adv_all.std() + 1e-8)
+    tiers_all = torch.tensor(all_tiers, dtype=torch.long, device=device)
 
     total_loss = total_ent = total_kl = total_clip = total_vloss = total_alpha = 0.0
+    total_ents = [0.0, 0.0, 0.0]
+    n_ents     = [0, 0, 0]
     n_updates = 0
 
     actor.train()
@@ -782,7 +808,23 @@ def ppo_update(actor: EdgeTransformerNet,
             ).mean()
 
             # Current alpha: adaptive if log_alpha provided, else fixed
-            alpha_cur = log_alpha.exp().detach() if log_alpha is not None else ent_coef
+            batch_tiers = tiers_all[batch]
+            batch_target_entropies = torch.tensor(TARGET_ENTROPIES, device=device)[batch_tiers]
+            if log_alpha is not None:
+                alpha_cur = torch.exp(log_alpha[batch_tiers]).detach()
+            else:
+                alpha_cur = torch.full_like(batch_target_entropies, ent_coef)
+
+            entropies_tensor = torch.stack(entropies)
+            entropy = entropies_tensor.mean()          # scalar for logging
+            values = torch.stack(values_list)
+
+            # Accumulate per-tier entropies for detailed logging
+            with torch.no_grad():
+                for i in range(len(batch)):
+                    t = batch_tiers[i].item()
+                    total_ents[t] += entropies_tensor[i].item()
+                    n_ents[t] += 1
 
             if freeze_actor:
                 loss = VAL_COEF * L_val
@@ -795,10 +837,12 @@ def ppo_update(actor: EdgeTransformerNet,
                     torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * adv_b,
                 ).mean()
                 
-                # Hard floor: absolutely prevent entropy from diving below 0.40
-                ent_floor_penalty = 5.0 * F.relu(0.40 - entropy)
+                # Scaled floor: prevent entropy from diving below (target - 0.05) per tier
+                batch_floors = batch_target_entropies - 0.05
+                ent_floor_penalty = 5.0 * F.relu(batch_floors - entropies_tensor).mean()
                 
-                loss = -L_clip + VAL_COEF * L_val - alpha_cur * entropy + ent_floor_penalty
+                entropy_loss_term = (alpha_cur * entropies_tensor).mean()
+                loss = -L_clip + VAL_COEF * L_val - entropy_loss_term + ent_floor_penalty
 
             with torch.no_grad():
                 approx_kl = ((ratio - 1) - torch.log(ratio.clamp(min=1e-8))).mean()
@@ -817,7 +861,10 @@ def ppo_update(actor: EdgeTransformerNet,
             # Separate from actor/critic update so alpha doesn't contaminate
             # the policy gradient. Only update when actor is not frozen.
             if log_alpha is not None and alpha_optimizer is not None and not freeze_actor:
-                alpha_loss = log_alpha * (entropy.detach() - TARGET_ENTROPY)
+                # Update each tier's alpha using the transitions from that tier
+                alpha_losses = log_alpha[batch_tiers] * (entropies_tensor.detach() - batch_target_entropies)
+                alpha_loss = alpha_losses.mean()
+                
                 alpha_optimizer.zero_grad()
                 alpha_loss.backward()
                 alpha_optimizer.step()
@@ -829,7 +876,7 @@ def ppo_update(actor: EdgeTransformerNet,
             total_kl    += approx_kl.item()
             total_clip  += clipfrac.item()
             total_vloss += L_val.item()
-            total_alpha += float(log_alpha.exp().item() if log_alpha is not None else ent_coef)
+            total_alpha += float(log_alpha.exp().mean().item() if log_alpha is not None else ent_coef)
             n_updates   += 1
 
             if not freeze_actor and approx_kl.item() > TARGET_KL * KL_STOP_MULT:
@@ -840,13 +887,17 @@ def ppo_update(actor: EdgeTransformerNet,
             break
 
     n = max(1, n_updates)
+    alphas_list = log_alpha.exp().detach().cpu().numpy().tolist() if log_alpha is not None else [ent_coef] * 3
+    entropies_list = [total_ents[t] / max(1, n_ents[t]) for t in range(3)]
     return {
         "loss":     total_loss  / n,
         "entropy":  total_ent   / n,
         "kl":       total_kl    / n,
         "clipfrac": total_clip  / n,
         "vloss":    total_vloss / n,
-        "alpha":    total_alpha / n,   # actual adaptive alpha used this round
+        "alpha":    total_alpha / n,   # actual adaptive alpha used this round (average)
+        "alphas":   alphas_list,
+        "entropies": entropies_list,
     }
 
 
@@ -943,11 +994,9 @@ def train(n_rounds:        int  = N_ROUNDS,
     ], weight_decay=1e-4)
 
     # ── Adaptive entropy temperature (SAC-style) ───────────────────────────
-    # log_alpha starts at log(ENT_COEF_START) and adapts every mini-batch
-    # to keep entropy at TARGET_ENTROPY. This is the ONLY reliable way to
-    # hold entropy when the agent is losing every game.
+    # log_alpha starts at log(ENT_COEF_START) for all three tiers
     log_alpha = nn.Parameter(
-        torch.tensor(math.log(ENT_COEF_START), dtype=torch.float32).to(device)
+        torch.tensor([math.log(ENT_COEF_START)] * 3, dtype=torch.float32).to(device)
     )
     alpha_optimizer = optim.Adam([log_alpha], lr=ALPHA_LR)
 
@@ -957,10 +1006,16 @@ def train(n_rounds:        int  = N_ROUNDS,
             try:
                 _c = torch.load(_ckpt_check, map_location=device, weights_only=False)
                 if 'log_alpha' in _c and not RESET_ENT_ON_RESUME:
-                    log_alpha.data.fill_(_c['log_alpha'])
-                    print(f"  Restored log_alpha={log_alpha.exp().item():.4f} from checkpoint")
+                    val = _c['log_alpha']
+                    if isinstance(val, (int, float)):
+                        log_alpha.data.fill_(val)
+                    else:
+                        log_alpha.data.copy_(torch.tensor(val, device=device))
+                    restored_str = "/".join(f"{a:.4f}" for a in log_alpha.exp().detach().cpu().numpy().tolist())
+                    print(f"  Restored log_alphas={restored_str} from checkpoint")
                 else:
-                    print(f"  log_alpha initialised at alpha={log_alpha.exp().item():.4f}  (fresh / reset)")
+                    fresh_str = "/".join(f"{a:.4f}" for a in log_alpha.exp().detach().cpu().numpy().tolist())
+                    print(f"  log_alphas initialised at alpha={fresh_str}  (fresh / reset)")
             except Exception:
                 pass
             break
@@ -1033,7 +1088,7 @@ def train(n_rounds:        int  = N_ROUNDS,
     print(f"Critic params: {n_critic:,}")
     print(f"\nPPO (EdgeTransformer): {n_rounds} rounds x {games_per_round} games")
     print(f"  LR actor={LR_ACTOR}  LR critic={LR_CRITIC}")
-    print(f"  ENT_COEF {ENT_COEF_START:.3f}→{ENT_COEF_END:.3f} over {ENT_COEF_RAMP} rounds  CLIP_EPS={CLIP_EPS}")
+    print(f"  ENT_COEF {ENT_COEF_START:.3f}->{ENT_COEF_END:.3f} over {ENT_COEF_RAMP} rounds  CLIP_EPS={CLIP_EPS}")
     print(f"  Critic warm-up: first {CRITIC_WARMUP_ROUNDS} rounds actor is frozen")
     print(f"  FORCE_1V1={FORCE_1V1}  Terminal win={TERMINAL_WIN}  loss={TERMINAL_LOSS}")
     print("=" * 60)
@@ -1058,6 +1113,8 @@ def train(n_rounds:        int  = N_ROUNDS,
 
     for rnd in range(start_rnd, start_rnd + n_rounds):
         wins = losses = 0
+        tier_games = [0, 0, 0]
+        tier_wins  = [0, 0, 0]
         all_bufs: list = []
         round_enemy_breakdown: dict = {}   # label -> {'w': 0, 'l': 0}
         g_1v1 = g_4v4 = 0
@@ -1071,6 +1128,7 @@ def train(n_rounds:        int  = N_ROUNDS,
                 filler, _   = _sample_enemy(pool, enemy_stats)
                 enemy_labels = [filler[0]]
                 fns         = [None, filler[1]]
+                abs_tier_idx = START_TIER if START_TIER_PURE else tier_idx
 
             elif g % 2 == 0:
                 mode_tag    = "1v1"
@@ -1080,6 +1138,7 @@ def train(n_rounds:        int  = N_ROUNDS,
                 filler, _   = _sample_enemy(pool, enemy_stats)
                 enemy_labels = [filler[0]]
                 fns         = [None, filler[1]]
+                abs_tier_idx = START_TIER if START_TIER_PURE else tier_idx
 
             else:
                 mode_tag    = "4p"
@@ -1090,6 +1149,7 @@ def train(n_rounds:        int  = N_ROUNDS,
                 fillers     = random.choices(pool, weights=probs, k=min(3, len(pool)))
                 enemy_labels = [lbl for lbl, _ in fillers]
                 fns         = [None] + [fn for _, fn in fillers]
+                abs_tier_idx = START_TIER if START_TIER_PURE else tier_idx
 
 
             seed = 42 + rnd * 1000 + g
@@ -1097,6 +1157,7 @@ def train(n_rounds:        int  = N_ROUNDS,
             try:
                 buf, outcome = play_game_collect(
                     actor, critic, fns, seed=seed, device=device)
+                buf.tier_idx = abs_tier_idx
                 all_bufs.append(buf)
             except Exception as e:
                 print(f"\n  game error: {e}")
@@ -1112,8 +1173,10 @@ def train(n_rounds:        int  = N_ROUNDS,
                 else:
                     round_enemy_breakdown[lbl]['l'] += 1
 
+            tier_games[abs_tier_idx] += 1
             if outcome == "WIN":
                 wins   += 1
+                tier_wins[abs_tier_idx] += 1
             else:
                 losses += 1
 
@@ -1140,10 +1203,14 @@ def train(n_rounds:        int  = N_ROUNDS,
             avg_ent  = stats["entropy"]
             avg_kl   = stats["kl"]
             cur_alpha = stats.get("alpha", ent_coef_val)
+            cur_alphas = stats.get("alphas", [ent_coef_val] * 3)
+            cur_entropies = stats.get("entropies", [avg_ent] * 3)
         else:
             avg_loss, avg_ent = stats
             avg_kl    = 0.0
             cur_alpha = ent_coef_val
+            cur_alphas = [ent_coef_val] * 3
+            cur_entropies = [avg_ent] * 3
             stats = {"clipfrac": 0.0}
         wr = wins / max(1, games_per_round)
 
@@ -1164,18 +1231,23 @@ def train(n_rounds:        int  = N_ROUNDS,
             g_tot = enemy_stats[label]['games']
             enemy_stats[label]['wr'] = round(enemy_stats[label]['wins'] / g_tot, 4) if g_tot else 0.0
 
-        # ── Record history and save curves ────────────────────────────────
+        # Calculate per-tier win rates for history
+        tier_wrs = [tier_wins[t] / tier_games[t] if tier_games[t] > 0 else 0.0 for t in range(3)]
+
         history.append({
             'round':            rnd,
             'wr':               wr,
+            'tier_wrs':         tier_wrs,
             'wins':             wins,
             'losses':           losses,
             'tier':             current_tier,
             'loss':             avg_loss,
-            'entropy':          avg_ent,
+            'entropy':          avg_ent,     # actual average entropy (mean)
+            'entropies':        cur_entropies, # per-tier average entropies
             'kl':               avg_kl,
             'clipfrac':         clipfrac,
-            'ent_coef':         cur_alpha,   # actual adaptive alpha
+            'ent_coef':         cur_alpha,   # actual adaptive alpha (mean)
+            'ent_coefs':        cur_alphas,  # per-tier adaptive alphas
             'events':           event_sum,
             'momentum':         mom_sum,
             'terminal':         term_sum,
@@ -1201,7 +1273,7 @@ def train(n_rounds:        int  = N_ROUNDS,
             "loss":           avg_loss,
             "entropy":        avg_ent,
             "kl":             avg_kl,
-            "log_alpha":      log_alpha.item(),   # save adaptive alpha
+            "log_alpha":      log_alpha.detach().cpu().numpy().tolist(),   # save adaptive alpha
             "actor":          actor.state_dict(),
             "critic":         critic.state_dict(),
         }
@@ -1243,8 +1315,12 @@ def train(n_rounds:        int  = N_ROUNDS,
         torch.save(ckpt, SAVE_PATH)
 
         warmup_str = "  [critic warmup — actor frozen]" if freeze_actor else ""
-        print(f"\n  -> WR={wr:.1%}  loss={avg_loss:.4f}  ent={avg_ent:.4f}  "
-              f"kl={avg_kl:.4f}  clip={clipfrac:.3f}  alpha={cur_alpha:.4f} [target={TARGET_ENTROPY:.2f}]"
+        cur_alphas_str = "/".join(f"{a:.4f}" for a in cur_alphas)
+        cur_ents_str   = "/".join(f"{e:.4f}" for e in cur_entropies)
+        targets_str    = "/".join(f"{t:.2f}" for t in TARGET_ENTROPIES)
+        cur_tier_wrs_str = "/".join(f"{tier_wins[t]/tier_games[t]:.1%}" if tier_games[t] > 0 else "N/A" for t in range(3))
+        print(f"\n  -> WR={wr:.1%} ({cur_tier_wrs_str})  loss={avg_loss:.4f}  ent={cur_ents_str}  "
+              f"kl={avg_kl:.4f}  clip={clipfrac:.3f}  alpha={cur_alphas_str} [target={targets_str}]"
               f"\n     reward:  events={event_sum:+.2f}  momentum={mom_sum:+.2f}  "
               f"terminal={term_sum:+.2f}  total={shaped_sum + term_sum:+.2f}"
               f"  tier={current_tier+1}/{n_tiers}"

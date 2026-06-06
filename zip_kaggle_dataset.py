@@ -256,8 +256,14 @@ def build_rl_zip(out_path: Path):
         (ROOT / "rl" / "transformer_history.json", "transformer_history.json"),
         (ROOT / "rl" / "enemy_stats.json",         "enemy_stats.json"),
         (ROOT / "rl" / "ppo_training.log",         "ppo_training.log"),
+        (ROOT / "rl" / "ppo_transformer.log",      "ppo_training.log"),
     ]
-    found = [(src, arc) for src, arc in candidates if src.exists()]
+    found = []
+    seen_arcs = set()
+    for src, arc in candidates:
+        if src.exists() and arc not in seen_arcs:
+            found.append((src, arc))
+            seen_arcs.add(arc)
 
     if not found:
         print("  [SKIP] No transformer checkpoints found in rl/.")
