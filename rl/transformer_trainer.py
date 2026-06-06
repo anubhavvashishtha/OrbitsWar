@@ -822,7 +822,7 @@ def ppo_update(actor: EdgeTransformerNet,
                 alpha_loss.backward()
                 alpha_optimizer.step()
                 with torch.no_grad():
-                    log_alpha.clamp_(max=-0.693)  # max alpha = 0.5
+                    log_alpha.clamp_(min=-4.6, max=-0.693)  # min alpha = 0.01, max alpha = 0.5
 
             total_loss  += loss.item()
             total_ent   += entropy.item()

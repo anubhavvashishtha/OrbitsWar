@@ -42,45 +42,45 @@
     "wr": 0.9858
   },
   "sigmaborov-reinforce": {
-    "wins": 0,
-    "losses": 27,
-    "games": 27,
-    "wr": 0.0
+    "wins": 1,
+    "losses": 455,
+    "games": 456,
+    "wr": 0.0022
   },
   "ykhnkf-distance-prioritized": {
-    "wins": 0,
-    "losses": 31,
-    "games": 31,
-    "wr": 0.0
+    "wins": 1,
+    "losses": 459,
+    "games": 460,
+    "wr": 0.0022
   },
   "pilkwang-structured": {
-    "wins": 0,
-    "losses": 22,
-    "games": 22,
-    "wr": 0.0
+    "wins": 1,
+    "losses": 429,
+    "games": 430,
+    "wr": 0.0023
   },
   "classifier_bot": {
     "wins": 0,
-    "losses": 28,
-    "games": 28,
+    "losses": 463,
+    "games": 463,
     "wr": 0.0
   },
   "main_1": {
     "wins": 0,
-    "losses": 29,
-    "games": 29,
+    "losses": 480,
+    "games": 480,
     "wr": 0.0
   },
   "main_3": {
-    "wins": 1,
-    "losses": 28,
-    "games": 29,
-    "wr": 0.0345
+    "wins": 19,
+    "losses": 425,
+    "games": 444,
+    "wr": 0.0428
   },
   "main_2": {
     "wins": 0,
-    "losses": 24,
-    "games": 24,
+    "losses": 465,
+    "games": 465,
     "wr": 0.0
   }
 }
