@@ -109,9 +109,22 @@ TOP_K_EDGES      = 5
 # If entropy > TARGET_ENTROPY: alpha decreases -> weaker entropy push
 # This is the ONLY mechanism that holds entropy under constant loss pressure.
 # A fixed ent_coef CANNOT win against the PPO gradient when all rewards are negative.
-TARGET_ENTROPIES = [0.35, 0.42, 0.45]  # Target entropy per tier: Tier 1 (easy), Tier 2 (medium), Tier 3 (hard)
+TARGET_ENTROPIES = [0.22, 0.42, 0.46]  # Target entropy per tier: Tier 1 (easy→match actual), Tier 2 (medium), Tier 3 (hard→explore but not random)
 TARGET_ENTROPY   = 0.42                # Legacy fallback
-ALPHA_LR         = 0.05                # stricter alpha tension: less reactive to pure tier 3 chaos
+# Per-tier alpha learning rates:
+#   T1: alpha is bounded low already, entropy is stable → very slow update
+#   T2: needs to climb and hold → medium
+#   T3: pure losses = pure noise signal → slow to avoid oscillation
+ALPHA_LRS        = [0.005, 0.03, 0.01]  # [T1, T2, T3]
+_ALPHA_LR_BASE   = ALPHA_LRS[1]         # Adam LR = T2 rate; T1/T3 scaled relative to it
+
+# Per-tier alpha bounds (exp of these = actual alpha range)
+# Tier 1: already winning → keep alpha LOW (0.01–0.10), don't let it explode
+# Tier 2: SAC must be free to push alpha DOWN when entropy > target → very low floor
+# Tier 3: same — floor only guards against extreme collapse, not normal regulation
+# Old floors at 0.05 were BLOCKING the SAC from reducing entropy above target.
+ALPHA_LOG_MIN = [-4.6,  -5.3,  -5.3]  # exp → [0.010, 0.005, 0.005]
+ALPHA_LOG_MAX = [-2.3,  -1.05, -0.92] # exp → [0.100, 0.350, 0.400]
 ENT_COEF_START = 0.1    # start strong so PPO doesn't get a head start on collapsing
 # ENT_COEF_END and ENT_COEF_RAMP kept for backward compat with notebook prints
 ENT_COEF_END   = 0.013
@@ -861,15 +874,36 @@ def ppo_update(actor: EdgeTransformerNet,
             # Separate from actor/critic update so alpha doesn't contaminate
             # the policy gradient. Only update when actor is not frozen.
             if log_alpha is not None and alpha_optimizer is not None and not freeze_actor:
-                # Update each tier's alpha using the transitions from that tier
-                alpha_losses = log_alpha[batch_tiers] * (entropies_tensor.detach() - batch_target_entropies)
-                alpha_loss = alpha_losses.mean()
-                
+                # Per-tier alpha update with per-tier effective LR.
+                # Strategy: compute gradient for each tier separately,
+                # scale it by (tier_lr / base_lr), accumulate into log_alpha.grad,
+                # then take a single Adam step. This gives each tier its own
+                # update magnitude while keeping one shared Adam m/v state.
                 alpha_optimizer.zero_grad()
-                alpha_loss.backward()
+                unique_tiers = batch_tiers.unique().tolist()
+                for t_i in unique_tiers:
+                    t_i = int(t_i)
+                    mask = (batch_tiers == t_i)
+                    if not mask.any():
+                        continue
+                    t_ent    = entropies_tensor[mask].detach()
+                    t_target = TARGET_ENTROPIES[t_i]
+                    lr_scale = ALPHA_LRS[t_i] / _ALPHA_LR_BASE
+                    # SAC alpha loss for this tier, scaled by relative LR
+                    a_loss = lr_scale * log_alpha[t_i] * (t_ent - t_target).mean()
+                    a_loss.backward()   # accumulates into log_alpha.grad
+                # Zero gradients for any tiers not seen this batch
+                with torch.no_grad():
+                    if log_alpha.grad is not None:
+                        for t_i in range(3):
+                            if t_i not in [int(x) for x in unique_tiers]:
+                                log_alpha.grad[t_i] = 0.0
                 alpha_optimizer.step()
                 with torch.no_grad():
-                    log_alpha.clamp_(min=-4.6, max=-0.693)  # min alpha = 0.01, max alpha = 0.5
+                    # Per-tier alpha bounds: T1 kept low (already winning),
+                    # T2/T3 have a floor so they can't decay to near-zero.
+                    for t_i, (lo, hi) in enumerate(zip(ALPHA_LOG_MIN, ALPHA_LOG_MAX)):
+                        log_alpha[t_i].clamp_(min=lo, max=hi)
 
             total_loss  += loss.item()
             total_ent   += entropy.item()
@@ -998,7 +1032,11 @@ def train(n_rounds:        int  = N_ROUNDS,
     log_alpha = nn.Parameter(
         torch.tensor([math.log(ENT_COEF_START)] * 3, dtype=torch.float32).to(device)
     )
-    alpha_optimizer = optim.Adam([log_alpha], lr=ALPHA_LR)
+    # Single Adam optimizer for log_alpha.
+    # Per-tier learning rates are applied by scaling each tier's gradient
+    # before the step (grad *= tier_lr / base_lr), so each tier effectively
+    # gets its own update magnitude without needing separate optimizers.
+    alpha_optimizer = optim.Adam([log_alpha], lr=_ALPHA_LR_BASE)
 
     # Resume log_alpha from checkpoint if available
     for _ckpt_check in [SAVE_PATH, BEST_PATH]:
@@ -1111,6 +1149,34 @@ def train(n_rounds:        int  = N_ROUNDS,
         probs = [w / total for w in weights]
         return random.choices(pool, weights=probs, k=1)[0], probs
 
+    # ── Per-tier WR tracker (rolling across rounds, reset each round for display)
+    # Used to compute tier game allocation weights.
+    _tier_wr_rolling = [0.5, 0.5, 0.5]  # start at 50% so initial split is equal
+
+    def _tier_game_allocation(n_games: int, tier_wrs: list, n_tiers: int) -> list:
+        """
+        Allocate n_games across tiers inversely proportional to current WR.
+        Tier with WR=100% → minimum 1 game (keep some signal).
+        Tier with WR=0%   → gets the lion's share.
+        Returns list of game counts, one per active tier (len = n_tiers).
+        """
+        if n_tiers == 1:
+            return [n_games]
+        # inverse-WR weight: (1 - wr) + 0.05 floor so no tier is starved
+        weights = [max(0.05, 1.0 - wr) for wr in tier_wrs[:n_tiers]]
+        total_w = sum(weights)
+        raw = [w / total_w * n_games for w in weights]
+        # Round to ints, guarantee at least 1 game per tier
+        alloc = [max(1, round(r)) for r in raw]
+        # Adjust rounding error so total == n_games
+        diff = n_games - sum(alloc)
+        if diff != 0:
+            # Add/remove from the tier with highest weight (most training needed)
+            heaviest = weights.index(max(weights))
+            alloc[heaviest] += diff
+            alloc[heaviest] = max(1, alloc[heaviest])
+        return alloc
+
     for rnd in range(start_rnd, start_rnd + n_rounds):
         wins = losses = 0
         tier_games = [0, 0, 0]
@@ -1119,10 +1185,20 @@ def train(n_rounds:        int  = N_ROUNDS,
         round_enemy_breakdown: dict = {}   # label -> {'w': 0, 'l': 0}
         g_1v1 = g_4v4 = 0
 
+        # ── Compute how many games each active tier gets this round ────────
+        n_active = len(active_tier_pools_1v1)
+        tier_alloc = _tier_game_allocation(games_per_round, _tier_wr_rolling, n_active)
+        # Build flat game schedule: [tier_idx, tier_idx, ...] length=games_per_round
+        game_schedule = []
+        for t_i, count in enumerate(tier_alloc):
+            game_schedule.extend([t_i] * count)
+        random.shuffle(game_schedule)   # randomise order within round
+
         for g in range(games_per_round):
             if FORCE_1V1:
                 mode_tag    = "1v1"
-                tier_idx    = g_1v1 % len(active_tier_pools_1v1)
+                tier_idx    = game_schedule[g] if not START_TIER_PURE else 0
+                tier_idx    = min(tier_idx, len(active_tier_pools_1v1) - 1)
                 pool        = active_tier_pools_1v1[tier_idx]
                 g_1v1      += 1
                 filler, _   = _sample_enemy(pool, enemy_stats)
@@ -1132,7 +1208,8 @@ def train(n_rounds:        int  = N_ROUNDS,
 
             elif g % 2 == 0:
                 mode_tag    = "1v1"
-                tier_idx    = g_1v1 % len(active_tier_pools_1v1)
+                tier_idx    = game_schedule[g] if not START_TIER_PURE else 0
+                tier_idx    = min(tier_idx, len(active_tier_pools_1v1) - 1)
                 pool        = active_tier_pools_1v1[tier_idx]
                 g_1v1      += 1
                 filler, _   = _sample_enemy(pool, enemy_stats)
@@ -1142,7 +1219,8 @@ def train(n_rounds:        int  = N_ROUNDS,
 
             else:
                 mode_tag    = "4p"
-                tier_idx    = g_4v4 % len(active_tier_pools_4v4)
+                tier_idx    = game_schedule[g] if not START_TIER_PURE else 0
+                tier_idx    = min(tier_idx, len(active_tier_pools_4v4) - 1)
                 pool        = active_tier_pools_4v4[tier_idx]
                 g_4v4      += 1
                 _, probs    = _sample_enemy(pool, enemy_stats)  # get PFSP weights
@@ -1234,6 +1312,12 @@ def train(n_rounds:        int  = N_ROUNDS,
         # Calculate per-tier win rates for history
         tier_wrs = [tier_wins[t] / tier_games[t] if tier_games[t] > 0 else 0.0 for t in range(3)]
 
+        # Update rolling WR for next round's tier allocation
+        # Use exponential moving average so allocation adapts smoothly
+        for t_i in range(len(active_tier_pools_1v1)):
+            if tier_games[t_i] > 0:
+                _tier_wr_rolling[t_i] = 0.7 * _tier_wr_rolling[t_i] + 0.3 * tier_wrs[t_i]
+
         history.append({
             'round':            rnd,
             'wr':               wr,
@@ -1319,9 +1403,12 @@ def train(n_rounds:        int  = N_ROUNDS,
         cur_ents_str   = "/".join(f"{e:.4f}" for e in cur_entropies)
         targets_str    = "/".join(f"{t:.2f}" for t in TARGET_ENTROPIES)
         cur_tier_wrs_str = "/".join(f"{tier_wins[t]/tier_games[t]:.1%}" if tier_games[t] > 0 else "N/A" for t in range(3))
+        tier_games_str = "/".join(str(tier_games[t]) for t in range(n_tiers))
+        tier_alloc_str = "/".join(str(x) for x in tier_alloc)
         print(f"\n  -> WR={wr:.1%} ({cur_tier_wrs_str})  loss={avg_loss:.4f}  ent={cur_ents_str}  "
               f"kl={avg_kl:.4f}  clip={clipfrac:.3f}  alpha={cur_alphas_str} [target={targets_str}]"
-              f"\n     reward:  events={event_sum:+.2f}  momentum={mom_sum:+.2f}  "
+              f"\n     games/tier={tier_games_str} (alloc={tier_alloc_str})  "
+              f"reward:  events={event_sum:+.2f}  momentum={mom_sum:+.2f}  "
               f"terminal={term_sum:+.2f}  total={shaped_sum + term_sum:+.2f}"
               f"  tier={current_tier+1}/{n_tiers}"
               f"{warmup_str}{tag}")
