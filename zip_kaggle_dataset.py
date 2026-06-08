@@ -184,6 +184,14 @@ def build_src_zip(out_path: Path):
         else:
             print("  [WARN] 'enemy agents/' not found -- notebook will use main.py as self-play bot.")
 
+        # ── Selfplay/ ─────────────────────────────────────────────────────────
+        sp = ROOT / "Selfplay"
+        if sp.exists():
+            print(f"\n  Selfplay/  (Historical self-play bots)")
+            _add_dir(zf, sp, "Selfplay", stats, max_mb=MAX_SRC_FILE_MB)
+        else:
+            print("  [WARN] 'Selfplay/' not found.")
+
     mb = out_path.stat().st_size / 1e6
     print(f"\n  Done: {stats['files']} files  ->  {mb:.1f} MB")
     return stats

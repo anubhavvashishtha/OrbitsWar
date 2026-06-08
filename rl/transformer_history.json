@@ -33138,5 +33138,2297 @@
         "l": 2
       }
     }
+  },
+  {
+    "round": 756,
+    "wr": 0.21875,
+    "tier_wrs": [
+      0.7,
+      0.0,
+      0.0
+    ],
+    "wins": 7,
+    "losses": 25,
+    "tier": 2,
+    "loss": 1.2832672595977783,
+    "entropy": 0.32891494035720825,
+    "entropies": [
+      0.23139862176030873,
+      0.4664684762557348,
+      0.5330650276607938
+    ],
+    "kl": 0.10343147814273834,
+    "clipfrac": 0.640625,
+    "ent_coef": 0.06243249028921127,
+    "ent_coefs": [
+      0.09066617488861084,
+      0.04831564053893089,
+      0.04831564053893089
+    ],
+    "events": 32.297999999999995,
+    "momentum": 0.3173673253049063,
+    "terminal": -87.0,
+    "total_reward": -54.3846326746951,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 3
+      },
+      "tamrazov-starwars": {
+        "w": 2,
+        "l": 3
+      },
+      "main_1": {
+        "w": 0,
+        "l": 3
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 1
+      },
+      "main": {
+        "w": 5,
+        "l": 0
+      },
+      "main_4": {
+        "w": 0,
+        "l": 3
+      },
+      "main_5": {
+        "w": 0,
+        "l": 5
+      },
+      "main_2": {
+        "w": 0,
+        "l": 4
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 1
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 1
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 1
+      }
+    }
+  },
+  {
+    "round": 757,
+    "wr": 0.25,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 8,
+    "losses": 24,
+    "tier": 2,
+    "loss": 1.8644304275512695,
+    "entropy": 0.2902943789958954,
+    "entropies": [
+      0.19517307819389715,
+      0.4361403665759347,
+      0.48159999400377274
+    ],
+    "kl": 0.3485925495624542,
+    "clipfrac": 0.59375,
+    "ent_coef": 0.06196897476911545,
+    "ent_coefs": [
+      0.0917520746588707,
+      0.047060754150152206,
+      0.04709408059716225
+    ],
+    "events": 42.36,
+    "momentum": 0.40666676953547304,
+    "terminal": -72.0,
+    "total_reward": -29.23333323046453,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "main_4": {
+        "w": 0,
+        "l": 5
+      },
+      "main_1": {
+        "w": 0,
+        "l": 1
+      },
+      "main_5": {
+        "w": 0,
+        "l": 3
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 1
+      },
+      "main_3": {
+        "w": 0,
+        "l": 2
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 2
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 2
+      },
+      "main": {
+        "w": 4,
+        "l": 0
+      },
+      "main_2": {
+        "w": 0,
+        "l": 2
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 4
+      },
+      "tamrazov-starwars": {
+        "w": 4,
+        "l": 0
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 2
+      }
+    }
+  },
+  {
+    "round": 758,
+    "wr": 0.15625,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 5,
+    "losses": 27,
+    "tier": 2,
+    "loss": 1.3447537422180176,
+    "entropy": 0.354515016078949,
+    "entropies": [
+      0.1008105491372672,
+      0.4726760196685791,
+      0.5090722406611723
+    ],
+    "kl": 0.2544613480567932,
+    "clipfrac": 0.5,
+    "ent_coef": 0.06175979971885681,
+    "ent_coefs": [
+      0.09367445856332779,
+      0.045766375958919525,
+      0.04583856835961342
+    ],
+    "events": 29.483999999999998,
+    "momentum": 0.24304985164154458,
+    "terminal": -117.0,
+    "total_reward": -87.27295014835846,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "main_5": {
+        "w": 0,
+        "l": 7
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 4
+      },
+      "tamrazov-starwars": {
+        "w": 1,
+        "l": 0
+      },
+      "main_1": {
+        "w": 0,
+        "l": 3
+      },
+      "main_4": {
+        "w": 0,
+        "l": 3
+      },
+      "main_2": {
+        "w": 0,
+        "l": 3
+      },
+      "main": {
+        "w": 4,
+        "l": 0
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 2
+      },
+      "main_3": {
+        "w": 0,
+        "l": 1
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 2
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 1
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 1
+      }
+    }
+  },
+  {
+    "round": 759,
+    "wr": 0.125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 4,
+    "losses": 28,
+    "tier": 2,
+    "loss": 1.0466954708099365,
+    "entropy": 0.36958351731300354,
+    "entropies": [
+      0.13705061733101806,
+      0.5394341985384623,
+      0.49090471506118777
+    ],
+    "kl": 0.1646595299243927,
+    "clipfrac": 0.5,
+    "ent_coef": 0.06171019375324249,
+    "ent_coefs": [
+      0.0959349200129509,
+      0.04455943405628204,
+      0.04463622346520424
+    ],
+    "events": 26.087999999999997,
+    "momentum": 0.21290675155869596,
+    "terminal": -132.0,
+    "total_reward": -105.6990932484413,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "classifier_bot": {
+        "w": 0,
+        "l": 3
+      },
+      "tamrazov-starwars": {
+        "w": 2,
+        "l": 0
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 5
+      },
+      "main_4": {
+        "w": 0,
+        "l": 7
+      },
+      "main_5": {
+        "w": 0,
+        "l": 5
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 2
+      },
+      "main_1": {
+        "w": 0,
+        "l": 2
+      },
+      "main_2": {
+        "w": 0,
+        "l": 2
+      },
+      "main_3": {
+        "w": 0,
+        "l": 2
+      },
+      "main": {
+        "w": 2,
+        "l": 0
+      }
+    }
+  },
+  {
+    "round": 760,
+    "wr": 0.09375,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 3,
+    "losses": 29,
+    "tier": 2,
+    "loss": 0.7813994884490967,
+    "entropy": 0.4695126414299011,
+    "entropies": [
+      0.39711910877376794,
+      0.5173364078998566,
+      0.4827903532668164
+    ],
+    "kl": 0.11147672683000565,
+    "clipfrac": 0.28125,
+    "ent_coef": 0.06093556806445122,
+    "ent_coefs": [
+      0.09596692770719528,
+      0.04333384335041046,
+      0.04350592568516731
+    ],
+    "events": 14.657999999999998,
+    "momentum": 0.13214786678925228,
+    "terminal": -147.0,
+    "total_reward": -132.20985213321075,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 3
+      },
+      "tamrazov-starwars": {
+        "w": 3,
+        "l": 0
+      },
+      "main_2": {
+        "w": 0,
+        "l": 1
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 3
+      },
+      "main_3": {
+        "w": 0,
+        "l": 1
+      },
+      "main_1": {
+        "w": 0,
+        "l": 3
+      },
+      "main_4": {
+        "w": 0,
+        "l": 6
+      },
+      "main_5": {
+        "w": 0,
+        "l": 5
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 3
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 3
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 1
+      }
+    }
+  },
+  {
+    "round": 761,
+    "wr": 0.09375,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.06666666666666667
+    ],
+    "wins": 3,
+    "losses": 29,
+    "tier": 2,
+    "loss": 1.1750235557556152,
+    "entropy": 0.38176703453063965,
+    "entropies": [
+      0.23870329037308693,
+      0.4718587826937437,
+      0.3573815383017063
+    ],
+    "kl": 0.10860322415828705,
+    "clipfrac": 0.484375,
+    "ent_coef": 0.06045404076576233,
+    "ent_coefs": [
+      0.09587286412715912,
+      0.04215575009584427,
+      0.0433335043489933
+    ],
+    "events": 25.746000000000013,
+    "momentum": 0.13635078765329345,
+    "terminal": -147.0,
+    "total_reward": -121.11764921234669,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "classifier_bot": {
+        "w": 0,
+        "l": 3
+      },
+      "main_4": {
+        "w": 0,
+        "l": 5
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 6
+      },
+      "main_5": {
+        "w": 0,
+        "l": 4
+      },
+      "tamrazov-starwars": {
+        "w": 1,
+        "l": 0
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 2
+      },
+      "main_3": {
+        "w": 1,
+        "l": 2
+      },
+      "main_1": {
+        "w": 0,
+        "l": 2
+      },
+      "main": {
+        "w": 1,
+        "l": 0
+      },
+      "main_2": {
+        "w": 0,
+        "l": 2
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 2
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 1
+      }
+    }
+  },
+  {
+    "round": 762,
+    "wr": 0.09375,
+    "tier_wrs": [
+      1.0,
+      0.125,
+      0.0
+    ],
+    "wins": 3,
+    "losses": 29,
+    "tier": 2,
+    "loss": 0.8125963807106018,
+    "entropy": 0.41858452558517456,
+    "entropies": [
+      0.17261690646409988,
+      0.3598082727442185,
+      0.49926805207806246
+    ],
+    "kl": 0.127588152885437,
+    "clipfrac": 0.34375,
+    "ent_coef": 0.06016887351870537,
+    "ent_coefs": [
+      0.09608520567417145,
+      0.04140704497694969,
+      0.043014366179704666
+    ],
+    "events": 25.014000000000014,
+    "momentum": 0.16584699247623783,
+    "terminal": -147.0,
+    "total_reward": -121.82015300752374,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "main_5": {
+        "w": 0,
+        "l": 7
+      },
+      "main_4": {
+        "w": 0,
+        "l": 5
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 3
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 2
+      },
+      "sigmaborov-starter": {
+        "w": 2,
+        "l": 2
+      },
+      "main_3": {
+        "w": 0,
+        "l": 4
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 2
+      },
+      "main": {
+        "w": 1,
+        "l": 0
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 2
+      },
+      "main_1": {
+        "w": 0,
+        "l": 2
+      }
+    }
+  },
+  {
+    "round": 763,
+    "wr": 0.0625,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0625
+    ],
+    "wins": 2,
+    "losses": 30,
+    "tier": 2,
+    "loss": 1.2474225759506226,
+    "entropy": 0.401106595993042,
+    "entropies": [
+      0.20314944189574038,
+      0.5185847539793361,
+      0.40778094849416185
+    ],
+    "kl": 0.12089170515537262,
+    "clipfrac": 0.46875,
+    "ent_coef": 0.059962958097457886,
+    "ent_coefs": [
+      0.09637441486120224,
+      0.04055040329694748,
+      0.04296405240893364
+    ],
+    "events": 7.841999999999999,
+    "momentum": 0.10242937580711826,
+    "terminal": -162.0,
+    "total_reward": -154.05557062419288,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "main_1": {
+        "w": 0,
+        "l": 5
+      },
+      "main_4": {
+        "w": 0,
+        "l": 9
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 2
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 3
+      },
+      "main_5": {
+        "w": 0,
+        "l": 4
+      },
+      "main_3": {
+        "w": 0,
+        "l": 3
+      },
+      "main": {
+        "w": 1,
+        "l": 0
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 2
+      },
+      "main_2": {
+        "w": 0,
+        "l": 1
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 1
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 1,
+        "l": 0
+      }
+    }
+  },
+  {
+    "round": 764,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.5271459221839905,
+    "entropy": 0.4651266485452652,
+    "entropies": [
+      0.12433917671442032,
+      0.5181400849268987,
+      0.4998337098707755
+    ],
+    "kl": 0.03772496338933706,
+    "clipfrac": 0.3671875,
+    "ent_coef": 0.05979631841182709,
+    "ent_coefs": [
+      0.09831059724092484,
+      0.0386686772108078,
+      0.042361799627542496
+    ],
+    "events": 7.655999999999999,
+    "momentum": 0.05279703603112234,
+    "terminal": -177.0,
+    "total_reward": -169.29120296396889,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "classifier_bot": {
+        "w": 0,
+        "l": 4
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 4
+      },
+      "main_5": {
+        "w": 0,
+        "l": 6
+      },
+      "main_3": {
+        "w": 0,
+        "l": 1
+      },
+      "main_2": {
+        "w": 0,
+        "l": 1
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 5
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 6
+      },
+      "main_1": {
+        "w": 0,
+        "l": 1
+      },
+      "main_4": {
+        "w": 0,
+        "l": 3
+      },
+      "main": {
+        "w": 1,
+        "l": 0
+      }
+    }
+  },
+  {
+    "round": 765,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.8516497611999512,
+    "entropy": 0.43991410732269287,
+    "entropies": [
+      0.09812752306461334,
+      0.49341627726188075,
+      0.5123001762798854
+    ],
+    "kl": 0.0435304194688797,
+    "clipfrac": 0.375,
+    "ent_coef": 0.059830643236637115,
+    "ent_coefs": [
+      0.09988383203744888,
+      0.037706900388002396,
+      0.041901201009750366
+    ],
+    "events": 12.347999999999995,
+    "momentum": 0.05642973881329222,
+    "terminal": -177.0,
+    "total_reward": -164.5955702611867,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 2
+      },
+      "main_3": {
+        "w": 0,
+        "l": 3
+      },
+      "main_5": {
+        "w": 0,
+        "l": 3
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 4
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 3
+      },
+      "main_2": {
+        "w": 0,
+        "l": 1
+      },
+      "main_4": {
+        "w": 0,
+        "l": 8
+      },
+      "main_1": {
+        "w": 0,
+        "l": 3
+      },
+      "tamrazov-starwars": {
+        "w": 1,
+        "l": 0
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 2
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 2
+      }
+    }
+  },
+  {
+    "round": 766,
+    "wr": 0.09375,
+    "tier_wrs": [
+      1.0,
+      0.13333333333333333,
+      0.0
+    ],
+    "wins": 3,
+    "losses": 29,
+    "tier": 2,
+    "loss": 1.2936638593673706,
+    "entropy": 0.4175991415977478,
+    "entropies": [
+      0.05341378040611744,
+      0.36052851821295917,
+      0.5027535100777943
+    ],
+    "kl": 0.06337489932775497,
+    "clipfrac": 0.359375,
+    "ent_coef": 0.059540651738643646,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.0370006263256073,
+      0.041362468153238297
+    ],
+    "events": 34.88400000000001,
+    "momentum": 0.15848105614809244,
+    "terminal": -147.0,
+    "total_reward": -111.95751894385191,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 4
+      },
+      "main_1": {
+        "w": 0,
+        "l": 2
+      },
+      "tamrazov-starwars": {
+        "w": 1,
+        "l": 0
+      },
+      "sigmaborov-starter": {
+        "w": 2,
+        "l": 2
+      },
+      "main_3": {
+        "w": 0,
+        "l": 3
+      },
+      "main_4": {
+        "w": 0,
+        "l": 6
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 3
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 2
+      },
+      "main_5": {
+        "w": 0,
+        "l": 5
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 1
+      },
+      "main_2": {
+        "w": 0,
+        "l": 1
+      }
+    }
+  },
+  {
+    "round": 767,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.7085648775100708,
+    "entropy": 0.455189973115921,
+    "entropies": [
+      0.15860291676861898,
+      0.475174255669117,
+      0.5019458400351661
+    ],
+    "kl": 0.05741552636027336,
+    "clipfrac": 0.421875,
+    "ent_coef": 0.059101324528455734,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.03628258407115936,
+      0.040762532502412796
+    ],
+    "events": 4.812,
+    "momentum": 0.058846031664945765,
+    "terminal": -177.0,
+    "total_reward": -172.12915396833506,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 5
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 4
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 3
+      },
+      "main_4": {
+        "w": 0,
+        "l": 8
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 3
+      },
+      "main_1": {
+        "w": 0,
+        "l": 2
+      },
+      "main_5": {
+        "w": 0,
+        "l": 3
+      },
+      "main": {
+        "w": 1,
+        "l": 0
+      },
+      "main_2": {
+        "w": 0,
+        "l": 3
+      }
+    }
+  },
+  {
+    "round": 768,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.44030219316482544,
+    "entropy": 0.4649866819381714,
+    "entropies": [
+      0.04868939093181065,
+      0.5546062253415585,
+      0.48811432177370245
+    ],
+    "kl": 0.05810127407312393,
+    "clipfrac": 0.3125,
+    "ent_coef": 0.058629777282476425,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.0354832299053669,
+      0.04014724865555763
+    ],
+    "events": 7.446,
+    "momentum": 0.06441388743260801,
+    "terminal": -177.0,
+    "total_reward": -169.4895861125674,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "main_3": {
+        "w": 0,
+        "l": 2
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 5
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 3
+      },
+      "main_4": {
+        "w": 0,
+        "l": 5
+      },
+      "main_2": {
+        "w": 0,
+        "l": 2
+      },
+      "main_1": {
+        "w": 0,
+        "l": 3
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 1
+      },
+      "tamrazov-starwars": {
+        "w": 1,
+        "l": 0
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 2
+      },
+      "main_5": {
+        "w": 0,
+        "l": 7
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 1
+      }
+    }
+  },
+  {
+    "round": 769,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.7074993252754211,
+    "entropy": 0.4489847421646118,
+    "entropies": [
+      0.10938010737299919,
+      0.4901670736651267,
+      0.5231425675253073
+    ],
+    "kl": 0.05135698616504669,
+    "clipfrac": 0.265625,
+    "ent_coef": 0.05812745913863182,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.03467964008450508,
+      0.03944389522075653
+    ],
+    "events": 7.332000000000001,
+    "momentum": 0.06129039642284628,
+    "terminal": -177.0,
+    "total_reward": -169.60670960357714,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 6
+      },
+      "main_3": {
+        "w": 0,
+        "l": 2
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 3
+      },
+      "main_5": {
+        "w": 0,
+        "l": 9
+      },
+      "main_1": {
+        "w": 0,
+        "l": 5
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 4
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 2
+      },
+      "main": {
+        "w": 1,
+        "l": 0
+      }
+    }
+  },
+  {
+    "round": 770,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.6050360798835754,
+    "entropy": 0.45704150199890137,
+    "entropies": [
+      0.04450607991644314,
+      0.5140645359793017,
+      0.5001196975891407
+    ],
+    "kl": 0.06482541561126709,
+    "clipfrac": 0.375,
+    "ent_coef": 0.05760993808507919,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.033853929489851,
+      0.03871702775359154
+    ],
+    "events": 9.6,
+    "momentum": 0.05056479997601297,
+    "terminal": -177.0,
+    "total_reward": -167.34943520002398,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "main_5": {
+        "w": 0,
+        "l": 4
+      },
+      "main_2": {
+        "w": 0,
+        "l": 1
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 5
+      },
+      "main_4": {
+        "w": 0,
+        "l": 6
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 3
+      },
+      "main_1": {
+        "w": 0,
+        "l": 1
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 5
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 3
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 1
+      },
+      "tamrazov-starwars": {
+        "w": 1,
+        "l": 0
+      },
+      "main_3": {
+        "w": 0,
+        "l": 2
+      }
+    }
+  },
+  {
+    "round": 771,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.35321617126464844,
+    "entropy": 0.44146275520324707,
+    "entropies": [
+      0.15014345198869705,
+      0.47408731068883625,
+      0.48028167979470615
+    ],
+    "kl": 0.046454254537820816,
+    "clipfrac": 0.328125,
+    "ent_coef": 0.05710901319980621,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.03305177018046379,
+      0.0380164235830307
+    ],
+    "events": 4.763999999999999,
+    "momentum": 0.05816567262550739,
+    "terminal": -177.0,
+    "total_reward": -172.17783432737448,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "main_2": {
+        "w": 0,
+        "l": 4
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 2
+      },
+      "main_5": {
+        "w": 0,
+        "l": 6
+      },
+      "main_4": {
+        "w": 0,
+        "l": 8
+      },
+      "main_1": {
+        "w": 0,
+        "l": 4
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 3
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 1
+      },
+      "main": {
+        "w": 1,
+        "l": 0
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 2
+      },
+      "main_3": {
+        "w": 0,
+        "l": 1
+      }
+    }
+  },
+  {
+    "round": 772,
+    "wr": 0.09375,
+    "tier_wrs": [
+      1.0,
+      0.125,
+      0.0
+    ],
+    "wins": 3,
+    "losses": 29,
+    "tier": 2,
+    "loss": 0.6565606594085693,
+    "entropy": 0.4292493462562561,
+    "entropies": [
+      0.21853730827569962,
+      0.4206917378016644,
+      0.46685775339603425
+    ],
+    "kl": 0.07081228494644165,
+    "clipfrac": 0.328125,
+    "ent_coef": 0.05665680021047592,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.03233876824378967,
+      0.037372782826423645
+    ],
+    "events": 47.226000000000006,
+    "momentum": 0.17151658867381003,
+    "terminal": -147.0,
+    "total_reward": -99.60248341132618,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "sigmaborov-starter": {
+        "w": 2,
+        "l": 8
+      },
+      "main_5": {
+        "w": 0,
+        "l": 4
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 2
+      },
+      "main_3": {
+        "w": 0,
+        "l": 3
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 1
+      },
+      "main_1": {
+        "w": 0,
+        "l": 3
+      },
+      "main_2": {
+        "w": 0,
+        "l": 1
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 3
+      },
+      "main_4": {
+        "w": 0,
+        "l": 2
+      },
+      "main": {
+        "w": 1,
+        "l": 0
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 2
+      }
+    }
+  },
+  {
+    "round": 773,
+    "wr": 0.09375,
+    "tier_wrs": [
+      1.0,
+      0.13333333333333333,
+      0.0
+    ],
+    "wins": 3,
+    "losses": 29,
+    "tier": 2,
+    "loss": 1.1419991254806519,
+    "entropy": 0.3858949542045593,
+    "entropies": [
+      0.06011857402821382,
+      0.383104155652034,
+      0.49450014923748215
+    ],
+    "kl": 0.10901277512311935,
+    "clipfrac": 0.40625,
+    "ent_coef": 0.05624420568346977,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.03176075220108032,
+      0.03671301156282425
+    ],
+    "events": 25.56600000000001,
+    "momentum": 0.15040212866092648,
+    "terminal": -147.0,
+    "total_reward": -121.28359787133907,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "main_1": {
+        "w": 0,
+        "l": 1
+      },
+      "main_5": {
+        "w": 0,
+        "l": 4
+      },
+      "sigmaborov-starter": {
+        "w": 2,
+        "l": 6
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 5
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 2
+      },
+      "main_3": {
+        "w": 0,
+        "l": 2
+      },
+      "main_2": {
+        "w": 0,
+        "l": 2
+      },
+      "main_4": {
+        "w": 0,
+        "l": 3
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 3
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 1
+      },
+      "tamrazov-starwars": {
+        "w": 1,
+        "l": 0
+      }
+    }
+  },
+  {
+    "round": 774,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 1.6274034976959229,
+    "entropy": 0.4244652986526489,
+    "entropies": [
+      0.12666568984942778,
+      0.4997424642244975,
+      0.5113234911646162
+    ],
+    "kl": 0.2715425491333008,
+    "clipfrac": 0.453125,
+    "ent_coef": 0.05580499768257141,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.03114786185324192,
+      0.03600827232003212
+    ],
+    "events": 9.384,
+    "momentum": 0.06002514948349184,
+    "terminal": -177.0,
+    "total_reward": -167.55597485051652,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 2
+      },
+      "main_5": {
+        "w": 0,
+        "l": 7
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 2
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 3
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 4
+      },
+      "main_4": {
+        "w": 0,
+        "l": 4
+      },
+      "main_2": {
+        "w": 0,
+        "l": 3
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 3
+      },
+      "main": {
+        "w": 1,
+        "l": 0
+      },
+      "main_1": {
+        "w": 0,
+        "l": 3
+      }
+    }
+  },
+  {
+    "round": 775,
+    "wr": 0.0625,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0625
+    ],
+    "wins": 2,
+    "losses": 30,
+    "tier": 2,
+    "loss": 1.25040602684021,
+    "entropy": 0.4732179641723633,
+    "entropies": [
+      0.04393772594630718,
+      0.520188977320989,
+      0.4493737322246206
+    ],
+    "kl": 0.10631932318210602,
+    "clipfrac": 0.34375,
+    "ent_coef": 0.055385392159223557,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.03049064241349697,
+      0.0354066826403141
+    ],
+    "events": 17.160000000000004,
+    "momentum": 0.1089535792059741,
+    "terminal": -162.0,
+    "total_reward": -144.73104642079403,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "main_5": {
+        "w": 0,
+        "l": 6
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 4
+      },
+      "main_3": {
+        "w": 1,
+        "l": 2
+      },
+      "main_4": {
+        "w": 0,
+        "l": 5
+      },
+      "main_1": {
+        "w": 0,
+        "l": 2
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 4
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 4
+      },
+      "tamrazov-starwars": {
+        "w": 1,
+        "l": 0
+      },
+      "main_2": {
+        "w": 0,
+        "l": 2
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 1
+      }
+    }
+  },
+  {
+    "round": 776,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.3662429451942444,
+    "entropy": 0.47154802083969116,
+    "entropies": [
+      0.11386042293161154,
+      0.5083548864049297,
+      0.4946703980011599
+    ],
+    "kl": 0.0415912177413702,
+    "clipfrac": 0.4375,
+    "ent_coef": 0.05475042201578617,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.02911761961877346,
+      0.03420870378613472
+    ],
+    "events": 6.600000000000001,
+    "momentum": 0.054075942016299415,
+    "terminal": -177.0,
+    "total_reward": -170.3459240579837,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "main_3": {
+        "w": 0,
+        "l": 3
+      },
+      "main_5": {
+        "w": 0,
+        "l": 5
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 2
+      },
+      "main_1": {
+        "w": 0,
+        "l": 5
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 3
+      },
+      "main": {
+        "w": 1,
+        "l": 0
+      },
+      "main_4": {
+        "w": 0,
+        "l": 8
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 2
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 1
+      },
+      "main_2": {
+        "w": 0,
+        "l": 1
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 1
+      }
+    }
+  },
+  {
+    "round": 777,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.8523985147476196,
+    "entropy": 0.4483133852481842,
+    "entropies": [
+      0.1213238830678165,
+      0.5260281100355345,
+      0.4617277836358106
+    ],
+    "kl": 0.08574388176202774,
+    "clipfrac": 0.390625,
+    "ent_coef": 0.054097630083560944,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.028397126123309135,
+      0.0336369089782238
+    ],
+    "events": 8.766,
+    "momentum": 0.05080065228253445,
+    "terminal": -177.0,
+    "total_reward": -168.18319934771748,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "main_1": {
+        "w": 0,
+        "l": 4
+      },
+      "main_5": {
+        "w": 0,
+        "l": 6
+      },
+      "main_3": {
+        "w": 0,
+        "l": 2
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 2
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 5
+      },
+      "main_4": {
+        "w": 0,
+        "l": 5
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 3
+      },
+      "tamrazov-starwars": {
+        "w": 1,
+        "l": 0
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 1
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 2
+      },
+      "main_2": {
+        "w": 0,
+        "l": 1
+      }
+    }
+  },
+  {
+    "round": 778,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.10060892254114151,
+    "entropy": 0.4890124201774597,
+    "entropies": [
+      0.3293763356549399,
+      0.485607795715332,
+      0.5265926206484437
+    ],
+    "kl": 0.04256764054298401,
+    "clipfrac": 0.375,
+    "ent_coef": 0.05364782735705376,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.027691589668393135,
+      0.03299304470419884
+    ],
+    "events": 5.064000000000001,
+    "momentum": 0.04836742133237112,
+    "terminal": -177.0,
+    "total_reward": -171.88763257866762,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 4
+      },
+      "main_1": {
+        "w": 0,
+        "l": 2
+      },
+      "main_5": {
+        "w": 0,
+        "l": 6
+      },
+      "main_3": {
+        "w": 0,
+        "l": 4
+      },
+      "main_4": {
+        "w": 0,
+        "l": 6
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 5
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 1
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 2
+      },
+      "main_2": {
+        "w": 0,
+        "l": 1
+      },
+      "tamrazov-starwars": {
+        "w": 1,
+        "l": 0
+      }
+    }
+  },
+  {
+    "round": 779,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.570609450340271,
+    "entropy": 0.468526229262352,
+    "entropies": [
+      0.11922987767805655,
+      0.5022393656628472,
+      0.5069198623299599
+    ],
+    "kl": 0.04372447030618787,
+    "clipfrac": 0.21875,
+    "ent_coef": 0.05296334624290466,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.026298705488443375,
+      0.031638339161872864
+    ],
+    "events": 8.844,
+    "momentum": 0.05444233926091782,
+    "terminal": -177.0,
+    "total_reward": -168.10155766073908,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 3
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 5
+      },
+      "main_5": {
+        "w": 0,
+        "l": 6
+      },
+      "main_3": {
+        "w": 0,
+        "l": 3
+      },
+      "main_4": {
+        "w": 0,
+        "l": 5
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 2
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 2
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 1
+      },
+      "main_2": {
+        "w": 0,
+        "l": 3
+      },
+      "main_1": {
+        "w": 0,
+        "l": 1
+      },
+      "main": {
+        "w": 1,
+        "l": 0
+      }
+    }
+  },
+  {
+    "round": 780,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 1.277740240097046,
+    "entropy": 0.43245071172714233,
+    "entropies": [
+      0.18202529437839984,
+      0.4899758666753769,
+      0.46921363678471795
+    ],
+    "kl": 0.08580458164215088,
+    "clipfrac": 0.3125,
+    "ent_coef": 0.052292581647634506,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.02561471052467823,
+      0.03100418671965599
+    ],
+    "events": 4.8180000000000005,
+    "momentum": 0.045794653614733435,
+    "terminal": -177.0,
+    "total_reward": -172.13620534638525,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "main_5": {
+        "w": 0,
+        "l": 7
+      },
+      "main_4": {
+        "w": 0,
+        "l": 6
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 3
+      },
+      "main_2": {
+        "w": 0,
+        "l": 1
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 3
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 4
+      },
+      "main_3": {
+        "w": 0,
+        "l": 4
+      },
+      "main_1": {
+        "w": 0,
+        "l": 1
+      },
+      "tamrazov-starwars": {
+        "w": 1,
+        "l": 0
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 1
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 1
+      }
+    }
+  },
+  {
+    "round": 781,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.45728492736816406,
+    "entropy": 0.4447169601917267,
+    "entropies": [
+      0.1717570616553227,
+      0.44448584717299255,
+      0.4995246320962906
+    ],
+    "kl": 0.04040047898888588,
+    "clipfrac": 0.34375,
+    "ent_coef": 0.05186809226870537,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.024983525276184082,
+      0.030361894518136978
+    ],
+    "events": 11.189999999999994,
+    "momentum": 0.052018338685262115,
+    "terminal": -177.0,
+    "total_reward": -165.75798166131474,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 5
+      },
+      "main_5": {
+        "w": 0,
+        "l": 4
+      },
+      "main_3": {
+        "w": 0,
+        "l": 3
+      },
+      "main_4": {
+        "w": 0,
+        "l": 7
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 3
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 5
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 1
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 2
+      },
+      "main_2": {
+        "w": 0,
+        "l": 1
+      },
+      "tamrazov-starwars": {
+        "w": 1,
+        "l": 0
+      }
+    }
+  },
+  {
+    "round": 782,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.749519944190979,
+    "entropy": 0.4760240912437439,
+    "entropies": [
+      0.3024232344081004,
+      0.5069169412766185,
+      0.4819108843803406
+    ],
+    "kl": 0.1102004274725914,
+    "clipfrac": 0.34375,
+    "ent_coef": 0.05145111680030823,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.024349365383386612,
+      0.02974514663219452
+    ],
+    "events": 5.063999999999998,
+    "momentum": 0.05367365396344892,
+    "terminal": -177.0,
+    "total_reward": -171.88232634603656,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "main_4": {
+        "w": 0,
+        "l": 8
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 3
+      },
+      "main_5": {
+        "w": 0,
+        "l": 5
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 3
+      },
+      "main_2": {
+        "w": 0,
+        "l": 4
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 2
+      },
+      "main_3": {
+        "w": 0,
+        "l": 1
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 1
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 3
+      },
+      "main": {
+        "w": 1,
+        "l": 0
+      },
+      "main_1": {
+        "w": 0,
+        "l": 1
+      }
+    }
+  },
+  {
+    "round": 783,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.539925217628479,
+    "entropy": 0.4287256896495819,
+    "entropies": [
+      0.06412320397794247,
+      0.4705629443580454,
+      0.4955165399157483
+    ],
+    "kl": 0.046615712344646454,
+    "clipfrac": 0.375,
+    "ent_coef": 0.05104263871908188,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.023741506040096283,
+      0.029127564281225204
+    ],
+    "events": 8.790000000000001,
+    "momentum": 0.06593696940838624,
+    "terminal": -177.0,
+    "total_reward": -168.1440630305916,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 4
+      },
+      "main_2": {
+        "w": 0,
+        "l": 2
+      },
+      "main_1": {
+        "w": 0,
+        "l": 4
+      },
+      "main_4": {
+        "w": 0,
+        "l": 9
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 2
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 2
+      },
+      "main_5": {
+        "w": 0,
+        "l": 3
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 2
+      },
+      "tamrazov-starwars": {
+        "w": 1,
+        "l": 0
+      },
+      "main_3": {
+        "w": 0,
+        "l": 2
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 1
+      }
+    }
+  },
+  {
+    "round": 784,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.5146909952163696,
+    "entropy": 0.43618038296699524,
+    "entropies": [
+      0.16399636917880603,
+      0.46778097472808977,
+      0.47124943137168884
+    ],
+    "kl": 0.055770084261894226,
+    "clipfrac": 0.4375,
+    "ent_coef": 0.05065753310918808,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.023159734904766083,
+      0.028553999960422516
+    ],
+    "events": 12.216000000000001,
+    "momentum": 0.05384714874581195,
+    "terminal": -177.0,
+    "total_reward": -164.7301528512542,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "main_5": {
+        "w": 0,
+        "l": 5
+      },
+      "main_1": {
+        "w": 0,
+        "l": 3
+      },
+      "main_3": {
+        "w": 0,
+        "l": 3
+      },
+      "main_2": {
+        "w": 0,
+        "l": 5
+      },
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 6
+      },
+      "tamrazov-starwars": {
+        "w": 1,
+        "l": 0
+      },
+      "main_4": {
+        "w": 0,
+        "l": 5
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 2
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 2
+      }
+    }
+  },
+  {
+    "round": 785,
+    "wr": 0.03125,
+    "tier_wrs": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "wins": 1,
+    "losses": 31,
+    "tier": 2,
+    "loss": 0.7635874152183533,
+    "entropy": 0.4551319479942322,
+    "entropies": [
+      0.16219583060592413,
+      0.4849802139732573,
+      0.5081521529575874
+    ],
+    "kl": 0.05855221673846245,
+    "clipfrac": 0.359375,
+    "ent_coef": 0.05026794970035553,
+    "ent_coefs": [
+      0.10025884956121445,
+      0.02258877456188202,
+      0.027956228703260422
+    ],
+    "events": 8.862000000000002,
+    "momentum": 0.05433597826495702,
+    "terminal": -177.0,
+    "total_reward": -168.08366402173505,
+    "freeze_actor": false,
+    "enemy_breakdown": {
+      "sigmaborov-starter": {
+        "w": 0,
+        "l": 6
+      },
+      "main_4": {
+        "w": 0,
+        "l": 6
+      },
+      "ykhnkf-distance-prioritized": {
+        "w": 0,
+        "l": 3
+      },
+      "main_3": {
+        "w": 0,
+        "l": 3
+      },
+      "main_5": {
+        "w": 0,
+        "l": 4
+      },
+      "tamrazov-starwars": {
+        "w": 1,
+        "l": 0
+      },
+      "sigmaborov-reinforce": {
+        "w": 0,
+        "l": 3
+      },
+      "main_2": {
+        "w": 0,
+        "l": 1
+      },
+      "main_1": {
+        "w": 0,
+        "l": 1
+      },
+      "classifier_bot": {
+        "w": 0,
+        "l": 2
+      },
+      "pilkwang-structured": {
+        "w": 0,
+        "l": 2
+      }
+    }
   }
 ]

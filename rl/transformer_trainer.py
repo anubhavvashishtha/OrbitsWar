@@ -109,8 +109,8 @@ TOP_K_EDGES      = 5
 # If entropy > TARGET_ENTROPY: alpha decreases -> weaker entropy push
 # This is the ONLY mechanism that holds entropy under constant loss pressure.
 # A fixed ent_coef CANNOT win against the PPO gradient when all rewards are negative.
-TARGET_ENTROPIES = [0.22, 0.42, 0.46]  # Target entropy per tier: Tier 1 (easy→match actual), Tier 2 (medium), Tier 3 (hard→explore but not random)
-TARGET_ENTROPY   = 0.42                # Legacy fallback
+TARGET_ENTROPIES = [0.22, 0.40, 0.45]  # Target entropy per tier: Tier 1 (easy), Tier 2 (medium), Tier 3 (hard)
+TARGET_ENTROPY   = 0.40                # Legacy fallback
 # Per-tier alpha learning rates:
 #   T1: alpha is bounded low already, entropy is stable → very slow update
 #   T2: needs to climb and hold → medium
@@ -569,7 +569,8 @@ def play_game_collect(actor: EdgeTransformerNet,
                       critic: TransformerCritic,
                       agent_fns: list,
                       seed: int,
-                      device: str):
+                      device: str,
+                      tier_idx: int = 0):
     """
     Play one FFA game.  Player 0 uses the actor to pick and execute edges.
     Returns (TransformerRolloutBuffer, outcome_str).
@@ -665,7 +666,10 @@ def play_game_collect(actor: EdgeTransformerNet,
     # ── Terminal reward override ───────────────────────────────────────────
     # Only two outcomes: WIN or LOSS.
     # Timeout always produces a winner by ship count; mutual elimination → LOSS.
-    t_win, t_loss = TERMINAL_WIN, TERMINAL_LOSS
+    if tier_idx == 0:
+        t_win, t_loss = TERMINAL_WIN, TERMINAL_LOSS  # +9.0, -6.0
+    else:
+        t_win, t_loss = 10.0, -1.0
 
     rewards = [float(_read(s, "reward", 0) or 0) for s in states]
     max_r   = max(rewards)
@@ -850,9 +854,9 @@ def ppo_update(actor: EdgeTransformerNet,
                     torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * adv_b,
                 ).mean()
                 
-                # Scaled floor: prevent entropy from diving below (target - 0.05) per tier
-                batch_floors = batch_target_entropies - 0.05
-                ent_floor_penalty = 5.0 * F.relu(batch_floors - entropies_tensor).mean()
+                # Floor penalty: fires only when entropy is well below target (real collapse).
+                batch_floors = batch_target_entropies - 0.12
+                ent_floor_penalty = 1.5 * F.relu(batch_floors - entropies_tensor).mean()
                 
                 entropy_loss_term = (alpha_cur * entropies_tensor).mean()
                 loss = -L_clip + VAL_COEF * L_val - entropy_loss_term + ent_floor_penalty
@@ -1058,14 +1062,12 @@ def train(n_rounds:        int  = N_ROUNDS,
                 pass
             break
 
-    # ── Load enemy agents ──────────────────────────────────────────────────
-    _std_paths = glob.glob(str(ENEMY_DIR / "*" / "main.py"))
-    _my_paths  = [p for p in glob.glob(str(ENEMY_DIR / "my" / "*.py"))
-                  if not Path(p).name.startswith("__")]
+    # ── Load Self-Play agents ────────────────────────────────────────────────
+    _selfplay_paths = glob.glob(str(PROJECT_ROOT / "Selfplay" / "*" / "main.py"))
     all_enemies: dict = {}   # label → fn
-    for ef in sorted(_std_paths + _my_paths):
+    for ef in sorted(_selfplay_paths):
         p     = Path(ef)
-        label = p.stem if p.parent.name == "my" else p.parent.name
+        label = p.parent.name
         try:
             fn, _ = load_agent(ef)
             all_enemies[label] = fn
@@ -1074,51 +1076,15 @@ def train(n_rounds:        int  = N_ROUNDS,
             print(f"  WARN {label}: {e}")
 
     if not all_enemies:
-        print(f"No enemy agents found in {ENEMY_DIR}"); return None
+        print(f"No self-play agents found in Selfplay/"); return None
 
-    # ── Curriculum pool setup ──────────────────────────────────────────────
-    def _build_tier_lists(tier_labels_list, label):
-        """Build per-tier (label, fn) lists."""
-        tier_agents = []
-        assigned = set()
-        for tier_labels in tier_labels_list:
-            tier = [(lbl, all_enemies[lbl]) for lbl in tier_labels if lbl in all_enemies]
-            tier_agents.append(tier)
-            assigned.update(lbl for lbl in tier_labels if lbl in all_enemies)
-        leftover = [(lbl, fn) for lbl, fn in all_enemies.items() if lbl not in assigned]
-        if leftover:
-            tier_agents[-1].extend(leftover)
-            print(f"  [{label}] {len(leftover)} untiered enemies added to Tier {len(tier_labels_list)}")
-        return tier_agents
+    # ── Curriculum pool setup (Pure Self-Play) ───────────────────────────────
+    # All loaded self-play enemies go into a single active pool
+    active_tier_pools_4v4 = [[(lbl, fn) for lbl, fn in all_enemies.items()]]
+    active_tier_pools_1v1 = [[(lbl, fn) for lbl, fn in all_enemies.items()]]
+    n_tiers = 1
 
-    tier_agents_1v1 = _build_tier_lists(CURRICULUM_TIERS_1V1, "1v1")
-    tier_agents_4v4 = _build_tier_lists(CURRICULUM_TIERS_4V4, "4v4")
-    n_tiers = len(tier_agents_1v1)
-
-    # Active pools — pure or cumulative depending on START_TIER_PURE
-    if START_TIER_PURE:
-        # Only the exact START_TIER pool — no mixing with lower tiers
-        active_tier_pools_1v1 = [tier_agents_1v1[min(START_TIER, n_tiers - 1)]]
-        active_tier_pools_4v4 = [tier_agents_4v4[min(START_TIER, n_tiers - 1)]]
-    else:
-        # Cumulative: tiers 0 through START_TIER all cycle
-        active_tier_pools_1v1 = [tier_agents_1v1[t] for t in range(min(START_TIER + 1, n_tiers)) if tier_agents_1v1[t]]
-        active_tier_pools_4v4 = [tier_agents_4v4[t] for t in range(min(START_TIER + 1, n_tiers)) if tier_agents_4v4[t]]
-
-    print("\n  1v1 curriculum:")
-    for t, tier in enumerate(tier_agents_1v1):
-        if START_TIER_PURE:
-            status = "ACTIVE" if t == START_TIER else "idle"
-        else:
-            status = "ACTIVE" if t <= START_TIER else "locked"
-        print(f"    Tier {t+1} [{status}]: {[lbl for lbl, _ in tier]}")
-    mode_str = f"pure Tier {START_TIER+1}" if START_TIER_PURE else f"Tier 1-{START_TIER+1} mixed"
-    print(f"    Mode: {mode_str}  ({sum(len(p) for p in active_tier_pools_1v1)} enemies)")
-
-    print(f"  4v4 curriculum: {'DISABLED (FORCE_1V1=True)' if FORCE_1V1 else 'enabled'}")
-    for t, tier in enumerate(tier_agents_4v4):
-        status = ("ACTIVE" if t <= START_TIER else "locked") if not FORCE_1V1 else "idle"
-        print(f"    Tier {t+1} [{status}]: {[lbl for lbl, _ in tier]}")
+    print(f"  Self-Play Mode: Loaded {len(all_enemies)} historical bots.")
 
     n_actor  = sum(p.numel() for p in actor.parameters()  if p.requires_grad)
     n_critic = sum(p.numel() for p in critic.parameters() if p.requires_grad)
@@ -1128,7 +1094,7 @@ def train(n_rounds:        int  = N_ROUNDS,
     print(f"  LR actor={LR_ACTOR}  LR critic={LR_CRITIC}")
     print(f"  ENT_COEF {ENT_COEF_START:.3f}->{ENT_COEF_END:.3f} over {ENT_COEF_RAMP} rounds  CLIP_EPS={CLIP_EPS}")
     print(f"  Critic warm-up: first {CRITIC_WARMUP_ROUNDS} rounds actor is frozen")
-    print(f"  FORCE_1V1={FORCE_1V1}  Terminal win={TERMINAL_WIN}  loss={TERMINAL_LOSS}")
+    print(f"  FORCE_1V1={FORCE_1V1}  Terminal: T1({TERMINAL_WIN}/{-6.0}) T2/T3(10.0/-1.0)")
     print("=" * 60)
 
     no_improve = 0
@@ -1162,8 +1128,10 @@ def train(n_rounds:        int  = N_ROUNDS,
         """
         if n_tiers == 1:
             return [n_games]
-        # inverse-WR weight: (1 - wr) + 0.05 floor so no tier is starved
-        weights = [max(0.05, 1.0 - wr) for wr in tier_wrs[:n_tiers]]
+        # inverse-WR weight: (1 - wr) + 0.80 floor so no tier is starved.
+        # A floor of 0.80 ensures that even mastered tiers (100% WR) get ~25-30% of games.
+        # This provides critical positive gradients to anchor the policy and prevent collapse.
+        weights = [max(0.80, 1.0 - wr) for wr in tier_wrs[:n_tiers]]
         total_w = sum(weights)
         raw = [w / total_w * n_games for w in weights]
         # Round to ints, guarantee at least 1 game per tier
@@ -1234,7 +1202,7 @@ def train(n_rounds:        int  = N_ROUNDS,
 
             try:
                 buf, outcome = play_game_collect(
-                    actor, critic, fns, seed=seed, device=device)
+                    actor, critic, fns, seed=seed, device=device, tier_idx=abs_tier_idx)
                 buf.tier_idx = abs_tier_idx
                 all_bufs.append(buf)
             except Exception as e:
@@ -1405,6 +1373,53 @@ def train(n_rounds:        int  = N_ROUNDS,
         cur_tier_wrs_str = "/".join(f"{tier_wins[t]/tier_games[t]:.1%}" if tier_games[t] > 0 else "N/A" for t in range(3))
         tier_games_str = "/".join(str(tier_games[t]) for t in range(n_tiers))
         tier_alloc_str = "/".join(str(x) for x in tier_alloc)
+        # ── Self-Play Auto-Saving ──────────────────────────────────────────────
+        import shutil
+        if (rnd + 1) % 50 == 0:
+            new_label = f"self_play_{rnd+1}"
+            new_dir = PROJECT_ROOT / "Selfplay" / new_label
+            new_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Copy template files needed for neural net inference
+            template_dir = PROJECT_ROOT / "imitation"
+            for f in ["agent_nn.py", "features.py", "model.py"]:
+                if (template_dir / f).exists():
+                    shutil.copy(template_dir / f, new_dir / f)
+            
+            # Create a simple main.py entry point
+            with open(new_dir / "main.py", "w") as f:
+                f.write("from agent_nn import agent\n")
+                
+            # Save the current actor weights
+            ckpt_dir = new_dir / "checkpoints"
+            ckpt_dir.mkdir(exist_ok=True)
+            torch.save(actor.state_dict(), ckpt_dir / "best_model.pt")
+            
+            # Dynamically load it into the active pool
+            try:
+                fn, _ = load_agent(str(new_dir / "main.py"))
+                all_enemies[new_label] = fn
+                active_tier_pools_1v1[0].append((new_label, fn))
+                active_tier_pools_4v4[0].append((new_label, fn))
+                print(f"  [Self-Play] Saved and loaded new bot: {new_label}")
+            except Exception as e:
+                print(f"  [Self-Play] Failed to load new bot: {e}")
+                
+            # Cleanup old bots if pool > 20
+            bot_folders = sorted(glob.glob(str(PROJECT_ROOT / "Selfplay" / "*")), key=os.path.getctime)
+            if len(bot_folders) > 20:
+                oldest = Path(bot_folders[0])
+                try:
+                    shutil.rmtree(oldest)
+                    print(f"  [Self-Play] Deleted oldest bot: {oldest.name}")
+                    # Remove from active pools
+                    active_tier_pools_1v1[0] = [(l, f) for l, f in active_tier_pools_1v1[0] if l != oldest.name]
+                    active_tier_pools_4v4[0] = [(l, f) for l, f in active_tier_pools_4v4[0] if l != oldest.name]
+                    if oldest.name in all_enemies:
+                        del all_enemies[oldest.name]
+                except Exception:
+                    pass
+
         print(f"\n  -> WR={wr:.1%} ({cur_tier_wrs_str})  loss={avg_loss:.4f}  ent={cur_ents_str}  "
               f"kl={avg_kl:.4f}  clip={clipfrac:.3f}  alpha={cur_alphas_str} [target={targets_str}]"
               f"\n     games/tier={tier_games_str} (alloc={tier_alloc_str})  "
