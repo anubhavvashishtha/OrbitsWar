@@ -89,7 +89,10 @@ def train(epochs=10, batch_size=64):
         # Shuffle the order of chunk files every epoch for maximum generalization!
         random.shuffle(chunk_files)
         
-        for chunk_file in chunk_files:
+        from tqdm import tqdm
+        
+        # Wrap the chunk list in a progress bar
+        for chunk_file in tqdm(chunk_files, desc=f"Epoch {epoch}/{start_epoch + epochs - 1}"):
             data = np.load(chunk_file)
             X = torch.from_numpy(data['X']).float()
             C = torch.from_numpy(data['Coords']).float()
@@ -97,13 +100,13 @@ def train(epochs=10, batch_size=64):
             M = torch.from_numpy(data['Mask']).bool()
             
             dataset = TensorDataset(X, C, Y, M)
-            dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+            dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
             
             for x_batch, c_batch, y_batch, mask_batch in dataloader:
-                x_batch = x_batch.to(device)
-                c_batch = c_batch.to(device)
-                y_batch = y_batch.to(device)
-                mask_batch = mask_batch.to(device)
+                x_batch = x_batch.to(device, non_blocking=True)
+                c_batch = c_batch.to(device, non_blocking=True)
+                y_batch = y_batch.to(device, non_blocking=True)
+                mask_batch = mask_batch.to(device, non_blocking=True)
                 
                 optimizer.zero_grad()
                 
@@ -150,4 +153,9 @@ def train(epochs=10, batch_size=64):
             plot_logs(logs)
 
 if __name__ == "__main__":
-    train(epochs=30)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--batch_size", type=int, default=64)
+    args = parser.parse_args()
+    train(epochs=args.epochs, batch_size=args.batch_size)
