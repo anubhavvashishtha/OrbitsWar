@@ -9,7 +9,7 @@ import numpy as np
 
 # Adjust imports to local path
 sys.path.insert(0, str(Path(__file__).parent))
-from features import build_spatial_features, NUM_FRACTION_BINS, MAX_PLANETS
+from features import build_spatial_features
 
 NUM_FRACTION_BINS = 6  # 0 to 5
 
@@ -65,9 +65,7 @@ def extract_replay(replay_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray
     
     # Filter by Top Players (Elite behavioral cloning)
     TOP_PLAYERS = {
-        "Isaiah @ Tufa Labs", "Vadasz", "bowwowforeach", "typeIIIfairy", 
-        "3Comets", "Jake Will", "saharan", "Maruichi01", "Audun Ljone Henriksen", 
-        "skalermo", "寿!", "Vincent Schuler", "Harm Buisman", "Kh0a", "Viltrum Empire"
+        "Isaiah @ Tufa Labs"
     }
     
     team_names = data.get("info", {}).get("TeamNames", [])
@@ -147,39 +145,52 @@ if __name__ == "__main__":
         output_dir = Path("/kaggle/working")
     else:
         print("Local Environment Detected!")
-        input_dir = Path(__file__).parent.parent / "records"
-        output_dir = Path(__file__).parent
-
+        input_dir = Path(__file__).parent.parent / "replay"
+        output_dir = Path(__file__).parent / "chunks"
+        
+    output_dir.mkdir(exist_ok=True)
     replays = list(input_dir.rglob("*.json"))
     print(f"Found {len(replays)} replays for extraction.")
 
-    BATCH_SIZE = 500
     chunk_idx = 0
     X_acc, C_acc, Y_acc, M_acc = [], [], [], []
 
-    for i, path in enumerate(replays):
-        x, c, y, m = extract_replay(str(path))
-        if x.shape[0] > 0:
-            X_acc.append(x)
-            C_acc.append(c)
-            Y_acc.append(y)
-            M_acc.append(m)
+    import concurrent.futures
+    import multiprocessing
+    
+    workers = min(4, multiprocessing.cpu_count())
+    print(f"Starting extraction with {workers} parallel workers...")
 
-        if len(X_acc) >= BATCH_SIZE or i == len(replays) - 1:
-            if not X_acc:
-                continue
+    # We use ProcessPoolExecutor to extract games concurrently.
+    # The main thread gathers the arrays and saves them without exceeding RAM.
+    from tqdm import tqdm
+    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+        # Use chunksize=1 so workers return each replay individually.
+        # Pickling 50 replays at once (chunksize=50) requires 3+ GB of RAM and crashes the IPC queue.
+        paths_str = [str(p) for p in replays]
+        for i, (x, c, y, m) in enumerate(tqdm(executor.map(extract_replay, paths_str, chunksize=1), total=len(paths_str), desc="Extracting Replays")):
+            if x.shape[0] > 0:
+                X_acc.append(x)
+                C_acc.append(c)
+                Y_acc.append(y)
+                M_acc.append(m)
+
+            total_steps = sum(arr.shape[0] for arr in X_acc)
+            if total_steps >= 3000 or i == len(replays) - 1:
+                if not X_acc:
+                    continue
+                    
+                X_batch = np.concatenate(X_acc, axis=0)
+                C_batch = np.concatenate(C_acc, axis=0)
+                Y_batch = np.concatenate(Y_acc, axis=0)
+                M_batch = np.concatenate(M_acc, axis=0)
                 
-            X_batch = np.concatenate(X_acc, axis=0)
-            C_batch = np.concatenate(C_acc, axis=0)
-            Y_batch = np.concatenate(Y_acc, axis=0)
-            M_batch = np.concatenate(M_acc, axis=0)
-            
-            chunk_path = output_dir / f"dataset_chunk_{chunk_idx:04d}.npz"
-            np.savez_compressed(chunk_path, X=X_batch, Coords=C_batch, Y=Y_batch, Mask=M_batch)
-            print(f"Saved {chunk_path} with {len(X_batch)} steps.")
-            
-            chunk_idx += 1
-            X_acc, C_acc, Y_acc, M_acc = [], [], [], []
-            gc.collect()
+                chunk_path = output_dir / f"dataset_chunk_{chunk_idx:04d}.npz"
+                np.savez_compressed(chunk_path, X=X_batch, Coords=C_batch, Y=Y_batch, Mask=M_batch)
+                print(f"Saved {chunk_path.name} with {len(X_batch)} steps. (Scanned {i+1}/{len(replays)})")
+                
+                chunk_idx += 1
+                X_acc, C_acc, Y_acc, M_acc = [], [], [], []
+                gc.collect()
 
     print("Extraction Complete.")

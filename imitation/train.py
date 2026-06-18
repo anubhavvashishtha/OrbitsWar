@@ -18,7 +18,7 @@ if os.path.exists("/kaggle/working"):
     MODELS_DIR = Path("/kaggle/working/models")
     LOGS_DIR = Path("/kaggle/working/logs")
 else:
-    DATASET_DIR = Path(__file__).parent
+    DATASET_DIR = Path(__file__).parent / "chunks"
     MODELS_DIR = Path(__file__).parent / "models"
     LOGS_DIR = Path(__file__).parent / "logs"
 
@@ -79,10 +79,15 @@ def train(epochs=10, batch_size=64):
         
     print(f"Found {len(chunk_files)} dataset chunks to train on.")
     
+    import random
+    
     for epoch in range(start_epoch, start_epoch + epochs):
         model.train()
         total_loss = 0.0
         total_valid_entries = 0
+        
+        # Shuffle the order of chunk files every epoch for maximum generalization!
+        random.shuffle(chunk_files)
         
         for chunk_file in chunk_files:
             data = np.load(chunk_file)
