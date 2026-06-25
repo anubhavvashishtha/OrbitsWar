@@ -171,3 +171,7 @@ def agent(obs):
 | `sunRadius` | 10.0 | Radius of the sun |
 | `boardSize` | 100.0 | Board dimensions |
 | `cometSpeed` | 4.0 | Comet speed (units/turn) |
+
+
+Team Lead : @anubhavvashishtha 
+Team Member : @neutrinomilan
